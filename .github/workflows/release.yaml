@@ -43,7 +43,7 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -74,7 +74,7 @@ jobs:
         run: |
           export BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           SKIP_WEB_BUILD=1 scripts/build/release.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-tarballs
           path: dist/release
@@ -116,7 +116,7 @@ jobs:
             nfpm package -f nfpm.yaml -p rpm -t dist/packages/
           done
           ls -l dist/packages
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-packages
           path: dist/packages

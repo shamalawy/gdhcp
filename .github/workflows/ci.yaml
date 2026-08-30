@@ -20,7 +20,7 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -63,7 +63,7 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 go build -trimpath -o dist/gdhcp ./server/cmd/gdhcp
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gdhcp-linux-amd64
           path: dist/gdhcp
