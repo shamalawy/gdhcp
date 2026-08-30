@@ -30,7 +30,7 @@ import { SseService } from '../../shared/sse.service';
 import { AddressStatusChipComponent } from '../../shared/components/address-status/address-status.component';
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
+import { PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { DHCPLease, DHCPPool, DHCPScope, LeaseAction, AddressStatus } from '../../shared/models';
 import { clientIdToHex } from '../shared/ip-utils';
 import { NotifyService } from '../shared/notify.service';
@@ -93,7 +93,6 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
     RouterLink,
     AddressStatusChipComponent,
     EmptyStateComponent,
-    PinChipComponent,
     PinButtonComponent,
     MatButtonModule,
     MatCheckboxModule,
@@ -225,15 +224,14 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
                 />
               </th>
               <th>IP</th>
+              <th>Status</th>
               <th>MAC</th>
               <th>Client ID</th>
               <th>Hostname</th>
               @if (!poolId()) {
                 <th>Pool</th>
               }
-              <th>Status</th>
               <th>Expires in</th>
-              <th>Pinned</th>
               <th class="actions"></th>
             </tr>
           </thead>
@@ -250,19 +248,16 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
                 <td class="gdhcp-mono">
                   <a [routerLink]="['/dhcp/leases', lease.id]">{{ lease.ip_address }}</a>
                 </td>
+                <td>
+                  <app-address-status-chip [status]="lease.address_status" />
+                </td>
                 <td class="gdhcp-mono">{{ lease.client_mac || '—' }}</td>
                 <td class="gdhcp-mono client-id">{{ formatClientId(lease.client_id) }}</td>
                 <td>{{ lease.client_hostname || '—' }}</td>
                 @if (!poolId()) {
                   <td>{{ poolLabel(lease.pool_id) }}</td>
                 }
-                <td>
-                  <app-address-status-chip [status]="lease.address_status" />
-                </td>
                 <td>{{ lease.address_status === 'assigned' ? expiresIn(lease) : '—' }}</td>
-                <td>
-                  <app-pin-chip [state]="lease.reservation_state" [reservation]="lease.reservation" />
-                </td>
                 <td class="actions">
                   <app-pin-button
                     [state]="lease.reservation_state"

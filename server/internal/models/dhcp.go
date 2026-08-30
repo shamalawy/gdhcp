@@ -243,16 +243,24 @@ const (
 // its lease binding state and the reservation concerning it. state is nil when
 // no lease row exists for the address at all.
 //
-// Precedence is deliberate and mirrors the allocator:
+// Precedence is deliberate:
 //
 //   - abandoned first: claimLeaseIP will not reclaim it, whatever else is true.
-//   - then an active lease: a client is on the address right now, even if a
-//     reservation also names it. "Assigned" plus a pin is the healthy state for
-//     a reservation actually in use.
-//   - then an enabled reservation: nobody is on the address, but it is held.
+//   - then an enabled reservation. A reservation is a durable property of the
+//     ADDRESS -- it is how the address is allocated, statically rather than
+//     dynamically -- so it outranks whoever happens to be holding the address
+//     at this instant. Reserving an address a client is currently using must
+//     make the address read as Reserved immediately; anything else means an
+//     operator reserves an address and the UI still calls it Assigned.
 //     A DISABLED reservation deliberately does not count -- scanCandidateIPs
 //     filters on is_enabled, so it holds nothing and the address really is free.
+//   - then an active lease, i.e. a dynamically assigned address.
 //   - otherwise free, which folds in released and expired.
+//
+// Assigned and Reserved are therefore ALLOCATION MODES (dynamic vs static),
+// not lifecycle states, and they are mutually exclusive. Occupancy is still
+// visible on the row itself -- the client MAC, hostname and lease expiry are
+// columns of their own.
 //
 // Postgres and the in-memory mock both call this, so the two can never
 // disagree, exactly as ClassifyLeaseReservation does for pin state.
@@ -260,10 +268,10 @@ func ClassifyAddressStatus(state *LeaseBindingState, res *LeaseReservation) Addr
 	switch {
 	case state != nil && *state == LeaseStateAbandoned:
 		return AddressAbandoned
-	case state != nil && *state == LeaseStateActive:
-		return AddressAssigned
 	case res != nil && res.IsEnabled:
 		return AddressReserved
+	case state != nil && *state == LeaseStateActive:
+		return AddressAssigned
 	default:
 		return AddressFree
 	}

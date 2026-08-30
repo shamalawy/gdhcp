@@ -13,7 +13,7 @@ import { AddressStatusChipComponent } from '../../shared/components/address-stat
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
-import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
+import { PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { DHCPLease, DHCPPool, DHCPScope, LeaseAction } from '../../shared/models';
 import { clientIdToHex } from '../shared/ip-utils';
 import { NotifyService } from '../shared/notify.service';
@@ -38,7 +38,6 @@ import {
     AddressStatusChipComponent,
     EmptyStateComponent,
     PageHeaderComponent,
-    PinChipComponent,
     PinButtonComponent,
     MatButtonModule,
     MatIconModule,
@@ -106,13 +105,28 @@ import {
             <span class="dhcp-binding-explain">The protocol-level binding state; released and expired both mean the address is free.</span>
           </dd>
 
+          <!-- A reservation is the SAME thing the Status row already calls
+               "Reserved" -- pinning is just the shortcut that creates one. So
+               this row states the FACT (which address the reservation binds,
+               and whether it is enabled) rather than repeating the status in a
+               second vocabulary. -->
           <dt>Reservation</dt>
           <dd>
-            <app-pin-chip [state]="l.reservation_state" [reservation]="l.reservation" />
-            @if (l.reservation_state === 'pinned') {
+            @if (l.reservation; as res) {
+              <span class="gdhcp-mono">{{ res.reserved_ip }}</span>
+              @if (res.reserved_ip !== l.ip_address) {
+                <span class="reservation-note">
+                  — this client is reserved on a different address, so it is not guaranteed to keep
+                  {{ l.ip_address }}.
+                </span>
+              } @else if (!res.is_enabled) {
+                <span class="reservation-note">— disabled, so the DHCP engine ignores it.</span>
+              }
               <a [routerLink]="['/dhcp/pools', l.pool_id]" [queryParams]="{ tab: 'reservations' }" class="reservation-link">
                 View in pool
               </a>
+            } @else {
+              <span class="gdhcp-muted">None — this address is handed out dynamically.</span>
             }
           </dd>
 
@@ -199,6 +213,12 @@ import {
       }
 
       /* gdhcp-state-chip is a global utility class defined in styles.scss. */
+
+      .reservation-note {
+        margin-left: 8px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
 
       .dhcp-binding-explain {
         display: block;

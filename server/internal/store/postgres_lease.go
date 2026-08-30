@@ -872,8 +872,9 @@ func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResul
 			))`
 
 	// Amendment A20: add the status filter if present. Predicates mirror
-	// ClassifyAddressStatus: abandoned > active(assigned) > enabled
-	// reservation(reserved) > free.
+	// ClassifyAddressStatus: abandoned > enabled reservation(reserved) >
+	// active(assigned) > free. A reservation outranks a lease, so "assigned"
+	// must exclude reserved addresses explicitly.
 	var statusClause string
 	if status != nil {
 		statusStr := status.(string)
@@ -1025,8 +1026,9 @@ func (p *Postgres) ListLeasesByPool(ctx context.Context, poolID string, params L
 			))`
 
 	// Amendment A20: add the status filter if present. Predicates mirror
-	// ClassifyAddressStatus: abandoned > active(assigned) > enabled
-	// reservation(reserved) > free. In ListLeasesByPool, we use unaliased column
+	// ClassifyAddressStatus: abandoned > enabled reservation(reserved) >
+	// active(assigned) > free. A reservation outranks a lease, so "assigned"
+	// must exclude reserved addresses explicitly. In ListLeasesByPool, we use unaliased column
 	// names in the base WHERE (not "l." prefix) so need to do the same here.
 	var statusClause string
 	if status != nil {

@@ -19,7 +19,7 @@ import { AddressStatus, BindingType, DHCPClient, LeaseBindingState } from '../..
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { AddressStatusChipComponent } from '../../shared/components/address-status/address-status.component';
-import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
+import { PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { NotifyService } from '../../dhcp/shared/notify.service';
 import {
   ReservationFormDialogComponent,
@@ -86,7 +86,6 @@ function formatBindingType(type: BindingType): string {
     MatTooltipModule,
     EmptyStateComponent,
     AddressStatusChipComponent,
-    PinChipComponent,
     PinButtonComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -134,7 +133,6 @@ function formatBindingType(type: BindingType): string {
               <th>Hostname</th>
               <th>Expires in</th>
               <th>Scope</th>
-              <th>Pinned</th>
               <th class="actions"></th>
             </tr>
           </thead>
@@ -157,9 +155,6 @@ function formatBindingType(type: BindingType): string {
                 </td>
                 <td>
                   <a [routerLink]="['/dhcp', 'scopes', client.scope_id]">{{ client.scope_name }}</a>
-                </td>
-                <td>
-                  <app-pin-chip [state]="client.reservation_state" [reservation]="client.reservation" />
                 </td>
                 <td class="actions" (click)="$event.stopPropagation()">
                   <app-pin-button

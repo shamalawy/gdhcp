@@ -6,21 +6,26 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { LeaseReservation, LeaseReservationState } from '../../models';
 
 /**
- * How one `LeaseReservationState` is presented: the chip in the Pinned
- * column, the pin button's icon, and the sentence that explains it.
+ * How one `LeaseReservationState` is presented on the pin BUTTON: its icon,
+ * its tone, and the sentences that explain it.
+ *
+ * There is deliberately no label here and no status chip. A reservation is
+ * the same thing the Status column already calls "Reserved" -- pinning is
+ * just the shortcut that creates one -- so a second status vocabulary beside
+ * the first only invited the two to disagree, which is exactly what happened
+ * when this table's "Reserved" meant something different from the Status
+ * column's.
  *
  * Both the DHCP leases table and the IPAM clients table render from this one
  * table, so the two cannot drift apart again — the whole point of amendment
- * A19. `label` is deliberately short (it sits in a table column); `explain`
- * is the tooltip and says what the DHCP engine will actually do, not what the
- * database row looks like.
+ * A19. `explain` is the tooltip and says what the DHCP engine will actually do,
+ * not what the database row looks like; `action` says what clicking will do.
  */
 interface PinPresentation {
-  label: string;
   /** Material icon name. `push_pin` reads as pinned, `push_pin` outlined as
    *  not; the filled/outlined distinction is carried by the CSS class. */
   icon: string;
-  /** Modifier class on the chip and the icon. */
+  /** Modifier class on the icon. */
   tone: 'none' | 'pinned' | 'warn' | 'blocked';
   explain: string;
   /** What clicking the pin button does in this state. */
@@ -32,7 +37,6 @@ function present(state: LeaseReservationState, otherIP: string): PinPresentation
   switch (state) {
     case 'pinned':
       return {
-        label: 'Pinned',
         icon: 'push_pin',
         tone: 'pinned',
         explain: 'Reserved for this client — it keeps this address across renewals and reboots.',
@@ -40,7 +44,6 @@ function present(state: LeaseReservationState, otherIP: string): PinPresentation
       };
     case 'pinned_disabled':
       return {
-        label: 'Pinned (off)',
         icon: 'push_pin',
         tone: 'warn',
         explain:
@@ -50,7 +53,6 @@ function present(state: LeaseReservationState, otherIP: string): PinPresentation
       };
     case 'pinned_elsewhere':
       return {
-        label: 'Pinned to ' + (otherIP || 'another address'),
         icon: 'push_pin',
         tone: 'warn',
         explain:
@@ -60,7 +62,6 @@ function present(state: LeaseReservationState, otherIP: string): PinPresentation
       };
     case 'address_reserved':
       return {
-        label: 'Reserved',
         icon: 'lock',
         tone: 'blocked',
         explain:
@@ -71,81 +72,12 @@ function present(state: LeaseReservationState, otherIP: string): PinPresentation
     case 'not_pinned':
     default:
       return {
-        label: '—',
         icon: 'push_pin',
         tone: 'none',
         explain: 'Not reserved — this client may be given a different address next time it asks.',
         action: 'Pin this address to the client as a reservation',
       };
   }
-}
-
-/**
- * The Pinned column's cell. Read-only; the action lives in
- * `app-pin-button` so a table can put the two in different columns.
- */
-@Component({
-  selector: 'app-pin-chip',
-  standalone: true,
-  imports: [MatIconModule, MatTooltipModule],
-  changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `
-    @if (view().tone === 'none') {
-      <span class="pin-chip tone-none" [matTooltip]="view().explain">—</span>
-    } @else {
-      <span class="pin-chip" [class]="'tone-' + view().tone" [matTooltip]="view().explain">
-        <mat-icon inline>{{ view().icon }}</mat-icon>
-        {{ view().label }}
-      </span>
-    }
-  `,
-  styles: [
-    `
-      .pin-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        font-size: 11px;
-        padding: 1px 8px;
-        border-radius: 10px;
-        white-space: nowrap;
-        font-weight: 500;
-      }
-
-      .pin-chip mat-icon {
-        font-size: 13px;
-        width: 13px;
-        height: 13px;
-      }
-
-      .tone-none {
-        color: var(--text-secondary);
-        padding: 0;
-      }
-
-      .tone-pinned {
-        background: color-mix(in srgb, var(--primary-color) 18%, transparent);
-        color: var(--primary-color);
-      }
-
-      .tone-warn {
-        background: color-mix(in srgb, var(--status-warn) 18%, transparent);
-        color: var(--status-warn);
-      }
-
-      .tone-blocked {
-        background: var(--util-track);
-        color: var(--text-secondary);
-      }
-    `,
-  ],
-})
-export class PinChipComponent {
-  readonly state = input.required<LeaseReservationState>();
-  /** The reservation behind the state, so "Pinned to 10.0.0.5" can name it. */
-  readonly reservation = input<LeaseReservation | null>(null);
-
-  readonly view = computed(() => present(this.state(), this.reservation()?.reserved_ip ?? ''));
 }
 
 /**

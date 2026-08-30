@@ -5,10 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-30
 
 ### Fixed
 
+- A reservation now outranks an active lease when classifying an address: reserving an address a client is currently using reads as `reserved` immediately. Assigned and Reserved are allocation modes (dynamic vs static), not lifecycle states, so they are mutually exclusive (amendment A20)
+- Removed the separate "Pinned" column from the leases and IPAM client tables. A reservation is the same thing the Status column calls "Reserved" — pinning is only the shortcut that creates one — so the second column duplicated the word "Reserved" with a different meaning. The pin remains as a row action (amendment A20)
+- The DHCP leases and IPAM clients tables now use the same column order, so the two sections read identically
 - Address status now replaces binding state rendering across all surfaces: AddressStatus (free/assigned/reserved/abandoned) folds `released` and `expired` into `free` where the allocator treats them identically (amendment A20)
 - IPAM clients listing no longer shows duplicate rows when an address has both a lease and an enabled reservation; the lease row carries the reservation state (amendment A20)
 - Subnet utilization now properly accounts for whole-subnet address space: reserved_infra (network/broadcast) + pool_total (addresses in DHCP pools) + static_total (in-subnet but outside pools) = space_total; pool narrowing no longer changes subnet utilization pct (amendment A20)
@@ -16,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Client listing pagination now includes stable `id` tiebreaker on every sort to prevent row repetition across pages (amendment A20)
 - Disabled reservations are now visible in IPAM clients listing so operators can see and re-enable them (amendment A20)
 - CLI `lease list` and `prefix clients` commands now show `STATUS` column (AddressStatus) instead of raw binding state (amendment A20)
-- Address status filtering is implemented in the store layer (Postgres and mock); API handlers are ready to expose `status` filter when updated
+- `GET /leases` and `GET /prefixes/{id}/clients` accept a `status` filter (free/assigned/reserved/abandoned) whose SQL predicates are kept in lockstep with `models.ClassifyAddressStatus` (amendment A20)
 - Reservation state is now visible in lease reads: DHCP and IPAM leases tables show whether a client is pinned, and with which address if pinned elsewhere (amendment A19)
 - CLI `lease` command now shows a `PINNED` column in the leases table (amendment A19)
 - Store now rejects duplicate reservations on the same address in a pool with `ErrReservationIPTaken` (amendment A19)

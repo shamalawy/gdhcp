@@ -514,10 +514,29 @@ func TestClassifyAddressStatus(t *testing.T) {
 			want:  models.AddressAssigned,
 		},
 		{
-			name:  "active lease plus reservation still assigned",
+			// A reservation is how the address is allocated (statically), so it
+			// outranks whoever happens to be holding it right now. Reserving an
+			// address a client is using must read as Reserved immediately --
+			// otherwise an operator pins an address and the UI still says
+			// Assigned.
+			name:  "active lease plus enabled reservation is reserved",
 			state: statePtr(models.LeaseStateActive),
 			res:   &models.LeaseReservation{IsEnabled: true},
+			want:  models.AddressReserved,
+		},
+		{
+			// A disabled reservation holds nothing, so the lease still decides.
+			name:  "active lease plus disabled reservation stays assigned",
+			state: statePtr(models.LeaseStateActive),
+			res:   &models.LeaseReservation{IsEnabled: false},
 			want:  models.AddressAssigned,
+		},
+		{
+			// Abandoned outranks everything: the allocator refuses to reclaim it.
+			name:  "abandoned outranks an enabled reservation",
+			state: statePtr(models.LeaseStateAbandoned),
+			res:   &models.LeaseReservation{IsEnabled: true},
+			want:  models.AddressAbandoned,
 		},
 		{
 			name:  "no lease, enabled reservation is reserved",

@@ -777,24 +777,27 @@ func (p *Postgres) ListClientsUnderPrefix(ctx context.Context, prefixID string, 
 	// Must stay in lockstep with models.ClassifyAddressStatus: if the two disagree,
 	// filtering by a status returns rows that do not show that status.
 	if status := params.Filters["status"]; status != "" {
+		// The order of tests below mirrors ClassifyAddressStatus's precedence:
+		// abandoned, then an enabled reservation, then an active lease. A
+		// reservation outranks a lease, so "assigned" must explicitly EXCLUDE
+		// reserved addresses or a reserved-and-occupied address would be
+		// returned by both filters and shown by neither correctly.
 		switch status {
-		case "assigned":
-			// assigned -> binding_state = 'active'
-			args = append(args, string(models.LeaseStateActive))
-			addCond(fmt.Sprintf("binding_state = $%d", len(args)))
 		case "abandoned":
-			// abandoned -> binding_state = 'abandoned'
 			args = append(args, string(models.LeaseStateAbandoned))
 			addCond(fmt.Sprintf("binding_state = $%d", len(args)))
 		case "reserved":
-			// reserved -> binding_state IS DISTINCT FROM 'active' AND binding_state IS DISTINCT FROM 'abandoned'
-			// AND reservation_is_enabled IS TRUE
-			args = append(args, string(models.LeaseStateActive), string(models.LeaseStateAbandoned))
-			addCond(fmt.Sprintf("binding_state IS DISTINCT FROM $%d AND binding_state IS DISTINCT FROM $%d AND reservation_is_enabled IS TRUE", len(args)-1, len(args)))
+			// Any enabled reservation that is not on an abandoned address.
+			args = append(args, string(models.LeaseStateAbandoned))
+			addCond(fmt.Sprintf("binding_state IS DISTINCT FROM $%d AND reservation_is_enabled IS TRUE", len(args)))
+		case "assigned":
+			// An active lease on an address no enabled reservation claims.
+			args = append(args, string(models.LeaseStateActive))
+			addCond(fmt.Sprintf("binding_state = $%d AND reservation_is_enabled IS NOT TRUE", len(args)))
 		case "free":
-			// free -> the complement: not assigned, not abandoned, not reserved
+			// The complement: neither abandoned, nor reserved, nor assigned.
 			args = append(args, string(models.LeaseStateActive), string(models.LeaseStateAbandoned))
-			addCond(fmt.Sprintf("binding_state IS DISTINCT FROM $%d AND binding_state IS DISTINCT FROM $%d AND (reservation_is_enabled IS NOT TRUE)", len(args)-1, len(args)))
+			addCond(fmt.Sprintf("binding_state IS DISTINCT FROM $%d AND binding_state IS DISTINCT FROM $%d AND reservation_is_enabled IS NOT TRUE", len(args)-1, len(args)))
 		}
 	}
 	// The handler exposes free text as the "q" filter; ParseListParams also
