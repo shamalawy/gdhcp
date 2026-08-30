@@ -6,7 +6,7 @@
 #   docker build -f deploy/docker/Dockerfile -t gdhcp:latest .
 
 # ---- Stage 1: Angular frontend --------------------------------------------
-FROM node:20-alpine AS web-builder
+FROM node:26-alpine AS web-builder
 
 WORKDIR /app/web
 COPY web/package*.json ./
