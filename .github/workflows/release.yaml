@@ -33,7 +33,7 @@ jobs:
     name: build Angular frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -54,7 +54,7 @@ jobs:
     needs: web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -85,7 +85,7 @@ jobs:
     needs: build-tarballs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -132,7 +132,7 @@ jobs:
     env:
       IMAGE: ghcr.io/shamalawy/gdhcp
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: derive build metadata
         id: meta
         run: |
@@ -196,7 +196,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: download all artifacts
         uses: actions/download-artifact@v4
         with:
