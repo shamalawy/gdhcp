@@ -34,3 +34,23 @@
 .idea/
 .vscode/
 *.swp
+# AI assistant tooling — local config only, never committed.
+# The knowledge-graph DB and every assistant's project config live outside
+# version control; the instructions that drive them are in the user's own
+# global config, not in this repo.
+.code-review-graph/
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+QODER.md
+CODEBUDDY.md
+.claude/
+.mcp.json
+.cursor/
+.cursorrules
+.windsurfrules
+.gemini/
+.codebuddy/
+.qoder/
+.kiro/
+opencode.jsonc
