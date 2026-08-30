@@ -545,7 +545,10 @@ func prefixAddressCount(n *net.IPNet) int64 {
 
 // GetPrefixUtilization mirrors Postgres.GetPrefixUtilization: a DHCP view
 // rolled up over every scope beneath the prefix, plus an address-space view
-// of how much of its CIDR its direct children cover.
+// of how much of its CIDR its direct children cover. Amendment A20 also
+// populates ReservedInfra, PoolTotal, StaticTotal for subnets (zero for
+// aggregates/containers), enforcing the invariant that ReservedInfra +
+// StaticTotal + PoolTotal == SpaceTotal for subnets.
 func (m *Mock) GetPrefixUtilization(ctx context.Context, prefixID string) (*models.PrefixUtilization, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -601,6 +604,62 @@ func (m *Mock) GetPrefixUtilization(ctx context.Context, prefixID string) (*mode
 		toUtilization(models.UtilizationEntityPrefix, prefixID)
 	pu.Total, pu.Active, pu.Reserved, pu.Available = u.Total, u.Active, u.Reserved, u.Available
 	pu.UtilizationPercentage = u.UtilizationPercentage
+
+	// Amendment A20: partition subnet address space into infrastructure
+	// (network/broadcast), DHCP pools, and static addresses. For aggregates
+	// and containers, all three are zero.
+	if p.PrefixType == models.PrefixTypeSubnet {
+		// Calculate reserved infrastructure addresses (network and broadcast).
+		// RFC 3021 (/31 and /32) have no reserved addresses.
+		ones, _ := p.Prefix.Mask.Size()
+		if ones < 31 {
+			pu.ReservedInfra = 2
+		} else {
+			pu.ReservedInfra = 0
+		}
+
+		// PoolTotal: addresses inside DHCP pools ON THIS PREFIX ONLY (not
+		// descendants). Sum of usable addresses in pools whose scope is bound
+		// to this prefix (not its descendants).
+		for _, sc := range m.scopes {
+			if sc.IPAMPrefixID != prefixID {
+				continue
+			}
+			for _, pool := range m.pools {
+				if pool.ScopeID != sc.ID {
+					continue
+				}
+				// Calculate pool size, excluding network/broadcast if they fall
+				// within the pool range.
+				poolSize := int64(pool.RangeEnd[3]) - int64(pool.RangeStart[3]) + 1
+				prefixNet := net.IPNet(*p.Prefix)
+				network, broadcast := cidrNetworkAndBroadcast(&prefixNet)
+				// Exclude network address if in range and not a /31 or /32.
+				if network != nil && ones < 31 {
+					networkInt := int64(network[3])
+					if int64(pool.RangeStart[3]) <= networkInt && networkInt <= int64(pool.RangeEnd[3]) {
+						poolSize--
+					}
+				}
+				// Exclude broadcast address if in range and not a /31 or /32.
+				if broadcast != nil && ones < 31 {
+					broadcastInt := int64(broadcast[3])
+					if int64(pool.RangeStart[3]) <= broadcastInt && broadcastInt <= int64(pool.RangeEnd[3]) {
+						poolSize--
+					}
+				}
+				pu.PoolTotal += poolSize
+			}
+		}
+
+		// StaticTotal: addresses not in any pool, clamped at zero in case a
+		// pathological configuration has pools exceeding the subnet space.
+		pu.StaticTotal = pu.SpaceTotal - pu.ReservedInfra - pu.PoolTotal
+		if pu.StaticTotal < 0 {
+			pu.StaticTotal = 0
+		}
+	}
+
 	return pu, nil
 }
 
@@ -1525,6 +1584,7 @@ func (m *Mock) ListLeases(ctx context.Context, params ListParams) (ListResult[*m
 	scopeID := params.Filters["scope_id"]
 	poolID := params.Filters["pool_id"]
 	state := params.Filters["state"]
+	status := params.Filters["status"]
 	search := strings.ToLower(strings.TrimSpace(params.Search))
 	items := m.leasesMatching(func(l *models.DHCPLease) bool {
 		if poolID != "" && l.PoolID != poolID {
@@ -1541,10 +1601,25 @@ func (m *Mock) ListLeases(ctx context.Context, params ListParams) (ListResult[*m
 		}
 		return search == "" || leaseMatchesSearch(l, search)
 	})
-	// Annotate with reservation state, per amendment A19.
+	// Annotate with reservation state, per amendment A19, and address status,
+	// per amendment A20.
 	for _, l := range items {
 		l.Reservation = m.leaseReservationLocked(l)
 		l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+		l.AddressStatus = models.ClassifyAddressStatus(&l.BindingState, l.Reservation)
+	}
+	// Apply status filter (amendment A20): the operator-level status of the
+	// address, distinct from the protocol-level binding_state. This filter
+	// sees the same address status classification as ListClientsUnderPrefix
+	// and the utilization summary.
+	if status != "" {
+		var filtered []*models.DHCPLease
+		for _, l := range items {
+			if string(l.AddressStatus) == status {
+				filtered = append(filtered, l)
+			}
+		}
+		items = filtered
 	}
 	limit, offset := normalizeListParams(params)
 	total := int64(len(items))
@@ -1606,9 +1681,11 @@ func (m *Mock) GetLease(ctx context.Context, id string) (*models.DHCPLease, erro
 	if !ok {
 		return nil, fmt.Errorf("mock: get lease %s: %w", id, models.ErrNotFound)
 	}
-	// Annotate with reservation state, per amendment A19.
+	// Annotate with reservation state, per amendment A19, and address status,
+	// per amendment A20.
 	l.Reservation = m.leaseReservationLocked(l)
 	l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	l.AddressStatus = models.ClassifyAddressStatus(&l.BindingState, l.Reservation)
 	return l, nil
 }
 
@@ -1616,6 +1693,7 @@ func (m *Mock) ListLeasesByPool(ctx context.Context, poolID string, params ListP
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := params.Filters["state"]
+	status := params.Filters["status"]
 	search := strings.ToLower(strings.TrimSpace(params.Search))
 	items := m.leasesMatching(func(l *models.DHCPLease) bool {
 		if l.PoolID != poolID {
@@ -1626,10 +1704,25 @@ func (m *Mock) ListLeasesByPool(ctx context.Context, poolID string, params ListP
 		}
 		return search == "" || leaseMatchesSearch(l, search)
 	})
-	// Annotate with reservation state, per amendment A19.
+	// Annotate with reservation state, per amendment A19, and address status,
+	// per amendment A20.
 	for _, l := range items {
 		l.Reservation = m.leaseReservationLocked(l)
 		l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+		l.AddressStatus = models.ClassifyAddressStatus(&l.BindingState, l.Reservation)
+	}
+	// Apply status filter (amendment A20): the operator-level status of the
+	// address, distinct from the protocol-level binding_state. This filter
+	// sees the same address status classification as ListClientsUnderPrefix
+	// and the utilization summary.
+	if status != "" {
+		var filtered []*models.DHCPLease
+		for _, l := range items {
+			if string(l.AddressStatus) == status {
+				filtered = append(filtered, l)
+			}
+		}
+		items = filtered
 	}
 	limit, offset := normalizeListParams(params)
 	total := int64(len(items))
@@ -1648,9 +1741,11 @@ func (m *Mock) GetLeaseByIPGlobal(ctx context.Context, ip net.IP) (*models.DHCPL
 		}
 	}
 	if best != nil {
-		// Annotate with reservation state, per amendment A19.
+		// Annotate with reservation state, per amendment A19, and address status,
+		// per amendment A20.
 		best.Reservation = m.leaseReservationLocked(best)
 		best.ReservationState = models.ClassifyLeaseReservation(best.Reservation)
+		best.AddressStatus = models.ClassifyAddressStatus(&best.BindingState, best.Reservation)
 	}
 	return best, nil
 }
@@ -3110,11 +3205,16 @@ func (m *Mock) ListPrefixesByVLAN(ctx context.Context, vlanID string) ([]*models
 // ListClientsUnderPrefix returns DHCP clients (leases and reservations)
 // under prefixID and its descendants, supporting filters and sorting.
 // This is the mock implementation of the store interface method.
-// ListClientsUnderPrefix mirrors the Postgres implementation: it walks the
-// prefix tree down from prefixID, gathers the leases and enabled reservations
-// of every scope hanging off a prefix in that subtree, then filters, sorts and
-// paginates them. The semantics must match postgres_ipam.go exactly, since the
-// API tests run against this mock.
+// ListClientsUnderPrefix mirrors the Postgres implementation (amendment A20):
+// it walks the prefix tree down from prefixID, gathers the leases and
+// reservations of every scope hanging off a prefix in that subtree, then
+// filters, sorts and paginates them. Crucially, it yields ONE ROW PER ADDRESS:
+// if an address holds both a lease and a reservation, the lease row is
+// returned (representing the assigned state) and the reservation is skipped
+// (to avoid duplication). Disabled reservations are always visible so they
+// can be re-enabled, and are classified as "free" since they hold nothing.
+// The semantics must match postgres_ipam.go exactly, since the API tests run
+// against this mock.
 func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, params ListParams) (ListResult[*models.DHCPClient], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3148,6 +3248,10 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 		}
 	}
 
+	// Track which (poolID, IPAddress) pairs have leases so we can skip
+	// duplicate reservation rows for the same address (amendment A20: one
+	// row per address, not one per lease/reservation).
+	leaseAddresses := make(map[string]map[string]bool) // poolID -> IP -> true
 	var all []*models.DHCPClient
 	for _, lease := range m.leases {
 		pool, ok := poolOwner[lease.PoolID]
@@ -3157,11 +3261,16 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 		scope := scopeOf[lease.PoolID]
 		state := lease.BindingState
 		start, end := lease.LeaseStart, lease.LeaseEnd
-		// Annotate with reservation state (amendment A19): find the reservation
-		// that concerns this lease, applying the same precedence as the lease
-		// read path.
+		// Annotate with reservation state (amendment A19) and address status
+		// (amendment A20): find the reservation that concerns this lease,
+		// applying the same precedence as the lease read path.
 		leaseRes := m.leaseReservationLocked(lease)
 		leaseState := models.ClassifyLeaseReservation(leaseRes)
+		addressStatus := models.ClassifyAddressStatus(&state, leaseRes)
+		if leaseAddresses[lease.PoolID] == nil {
+			leaseAddresses[lease.PoolID] = make(map[string]bool)
+		}
+		leaseAddresses[lease.PoolID][lease.IPAddress.String()] = true
 		all = append(all, &models.DHCPClient{
 			ID:               lease.ID,
 			Kind:             models.ClientKindLease,
@@ -3179,21 +3288,31 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 			LeaseEnd:         &end,
 			ReservationState: leaseState,
 			Reservation:      leaseRes,
+			AddressStatus:    addressStatus,
 			CreatedAt:        lease.CreatedAt,
 			UpdatedAt:        lease.UpdatedAt,
 		})
 	}
+	// Amendment A20: iterate all reservations (enabled and disabled alike),
+	// but skip those whose address already has a lease in the same pool
+	// (one row per address).
 	for _, res := range m.reservations {
 		pool, ok := poolOwner[res.PoolID]
-		if !ok || !res.IsEnabled {
+		if !ok {
+			continue
+		}
+		// Skip this reservation if its address already has a lease in this pool.
+		if leaseAddresses[res.PoolID][res.ReservedIP.String()] {
 			continue
 		}
 		scope := scopeOf[res.PoolID]
 		key, bindingType, enabled := res.BindingKey, res.BindingType, res.IsEnabled
-		// Annotate with reservation state (amendment A19): a reservation row
-		// describes itself, so Reservation is populated from itself with
-		// MatchesClient and MatchesAddress both true. ReservationState is
-		// LeasePinned (enabled) or LeasePinnedDisabled (disabled).
+		// Annotate with reservation state (amendment A19) and address status
+		// (amendment A20): a reservation row describes itself, so Reservation
+		// is populated from itself with MatchesClient and MatchesAddress both
+		// true. ReservationState is LeasePinned (enabled) or LeasePinnedDisabled
+		// (disabled). AddressStatus reflects whether the address is actually
+		// reserved or free (disabled reservations are free).
 		resState := models.LeaseReservation{
 			ID:             res.ID,
 			ReservedIP:     res.ReservedIP,
@@ -3204,6 +3323,7 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 			MatchesAddress: true,
 		}
 		reservationState := models.ClassifyLeaseReservation(&resState)
+		addressStatus := models.ClassifyAddressStatus(nil, &resState)
 		client := &models.DHCPClient{
 			ID:               res.ID,
 			Kind:             models.ClientKindReservation,
@@ -3219,6 +3339,7 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 			IsEnabled:        &enabled,
 			ReservationState: reservationState,
 			Reservation:      &resState,
+			AddressStatus:    addressStatus,
 			CreatedAt:        res.CreatedAt,
 			UpdatedAt:        res.UpdatedAt,
 		}
@@ -3256,6 +3377,20 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 		}
 		filtered = next
 	}
+	// Amendment A20: add status filter (free|assigned|reserved|abandoned), the
+	// operator-facing classification that hides protocol-level details. This
+	// filter sees the same address status classification as the utilization
+	// summary, so the client table and the counts can never contradict each
+	// other.
+	if status := params.Filters["status"]; status != "" {
+		var next []*models.DHCPClient
+		for _, c := range filtered {
+			if string(c.AddressStatus) == status {
+				next = append(next, c)
+			}
+		}
+		filtered = next
+	}
 	// Accept either the "q" filter the handler registers or the "search"
 	// param ParseListParams fills, exactly as the Postgres side does.
 	search := params.Filters["q"]
@@ -3287,26 +3422,50 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 	if strings.HasPrefix(field, "-") {
 		field, desc = field[1:], true
 	}
-	less := func(i, j int) bool { return compareIP(filtered[i].IPAddress, filtered[j].IPAddress) < 0 }
+	// Default sort by IP address, with id as tiebreaker for deterministic order.
+	less := func(i, j int) bool {
+		cmp := compareIP(filtered[i].IPAddress, filtered[j].IPAddress)
+		if cmp != 0 {
+			return cmp < 0
+		}
+		return filtered[i].ID < filtered[j].ID
+	}
 	switch field {
 	case "lease_end":
 		less = func(i, j int) bool {
 			a, b := filtered[i].LeaseEnd, filtered[j].LeaseEnd
 			switch {
 			case a == nil && b == nil:
-				return false
+				return filtered[i].ID < filtered[j].ID // tiebreaker
 			case a == nil:
 				return false // reservations sort after leases
 			case b == nil:
 				return true
 			default:
+				if a.Equal(*b) {
+					return filtered[i].ID < filtered[j].ID // tiebreaker
+				}
 				return a.Before(*b)
 			}
 		}
 	case "client_mac":
-		less = func(i, j int) bool { return macKey(filtered[i]) < macKey(filtered[j]) }
+		less = func(i, j int) bool {
+			macCmp := macKey(filtered[i])
+			macJ := macKey(filtered[j])
+			if macCmp == macJ {
+				return filtered[i].ID < filtered[j].ID // tiebreaker
+			}
+			return macCmp < macJ
+		}
 	case "client_hostname":
-		less = func(i, j int) bool { return hostnameKey(filtered[i]) < hostnameKey(filtered[j]) }
+		less = func(i, j int) bool {
+			hostCmp := hostnameKey(filtered[i])
+			hostJ := hostnameKey(filtered[j])
+			if hostCmp == hostJ {
+				return filtered[i].ID < filtered[j].ID // tiebreaker
+			}
+			return hostCmp < hostJ
+		}
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if desc {

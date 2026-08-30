@@ -15,9 +15,10 @@ import { Subject } from 'rxjs';
 import { debounceTime, distinctUntilChanged } from 'rxjs/operators';
 
 import { ApiService } from '../../shared/api.service';
-import { BindingType, DHCPClient, LeaseBindingState } from '../../shared/models';
+import { AddressStatus, BindingType, DHCPClient, LeaseBindingState } from '../../shared/models';
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
+import { AddressStatusChipComponent } from '../../shared/components/address-status/address-status.component';
 import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { NotifyService } from '../../dhcp/shared/notify.service';
 import {
@@ -84,6 +85,7 @@ function formatBindingType(type: BindingType): string {
     MatSelectModule,
     MatTooltipModule,
     EmptyStateComponent,
+    AddressStatusChipComponent,
     PinChipComponent,
     PinButtonComponent,
   ],
@@ -92,26 +94,15 @@ function formatBindingType(type: BindingType): string {
     <div class="controls-row">
       <div class="filters">
         <mat-form-field appearance="outline" subscriptSizing="dynamic">
-          <mat-label>Kind</mat-label>
-          <mat-select [(ngModel)]="kindFilter" (ngModelChange)="onKindChange($event)">
+          <mat-label>Status</mat-label>
+          <mat-select [(ngModel)]="statusFilter" (ngModelChange)="onStatusChange($event)">
             <mat-option value="">All</mat-option>
-            <mat-option value="lease">Leases</mat-option>
-            <mat-option value="reservation">Reservations</mat-option>
+            <mat-option value="free">Free</mat-option>
+            <mat-option value="assigned">Assigned</mat-option>
+            <mat-option value="reserved">Reserved</mat-option>
+            <mat-option value="abandoned">Abandoned</mat-option>
           </mat-select>
         </mat-form-field>
-
-        @if (kindFilter === 'lease') {
-          <mat-form-field appearance="outline" subscriptSizing="dynamic">
-            <mat-label>State</mat-label>
-            <mat-select [(ngModel)]="stateFilter" (ngModelChange)="onStateChange($event)">
-              <mat-option value="">All</mat-option>
-              <mat-option value="active">Active</mat-option>
-              <mat-option value="expired">Expired</mat-option>
-              <mat-option value="released">Released</mat-option>
-              <mat-option value="abandoned">Abandoned</mat-option>
-            </mat-select>
-          </mat-form-field>
-        }
 
         <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
           <mat-label>Search IP, MAC or hostname</mat-label>
@@ -137,11 +128,10 @@ function formatBindingType(type: BindingType): string {
           <thead>
             <tr>
               <th>IP</th>
-              <th>Kind</th>
+              <th>Status</th>
               <th>MAC</th>
               <th>Client ID</th>
               <th>Hostname</th>
-              <th>State</th>
               <th>Expires in</th>
               <th>Scope</th>
               <th>Pinned</th>
@@ -149,24 +139,15 @@ function formatBindingType(type: BindingType): string {
             </tr>
           </thead>
           <tbody>
-            @for (client of clients(); track client.ip_address) {
+            @for (client of clients(); track client.id) {
               <tr>
                 <td class="gdhcp-mono">{{ client.ip_address }}</td>
                 <td>
-                  <span class="kind-chip" [class]="'kind-' + client.kind">
-                    {{ client.kind === 'lease' ? 'Lease' : 'Reservation' }}
-                  </span>
+                  <app-address-status-chip [status]="client.address_status" />
                 </td>
                 <td class="gdhcp-mono">{{ client.client_mac || '—' }}</td>
                 <td class="gdhcp-mono">{{ formatClientId(client.client_id) }}</td>
                 <td>{{ client.client_hostname || '—' }}</td>
-                <td>
-                  @if (client.binding_state) {
-                    <span class="gdhcp-state-chip" [class]="'state-' + client.binding_state">{{ client.binding_state }}</span>
-                  } @else {
-                    <span class="gdhcp-muted">—</span>
-                  }
-                </td>
                 <td>
                   @if (client.kind === 'lease' && client.binding_state === 'active' && client.lease_end) {
                     {{ expiresIn(client) }}
@@ -227,25 +208,6 @@ function formatBindingType(type: BindingType): string {
         min-width: 180px;
       }
 
-      .kind-chip {
-        display: inline-block;
-        font-size: 11px;
-        padding: 1px 8px;
-        border-radius: 10px;
-        text-transform: capitalize;
-        font-weight: 500;
-      }
-
-      .kind-lease {
-        background: color-mix(in srgb, var(--util-ok) 20%, transparent);
-        color: var(--status-ok);
-      }
-
-      .kind-reservation {
-        background: color-mix(in srgb, var(--primary-color) 20%, transparent);
-        color: var(--primary-color);
-      }
-
       .actions {
         text-align: right;
         white-space: nowrap;
@@ -271,8 +233,7 @@ export class PrefixClientsComponent {
   readonly limit = signal(PAGE_SIZE_OPTIONS[1]);
   readonly pageIndex = signal(0);
 
-  kindFilter = '';
-  stateFilter = '';
+  statusFilter: AddressStatus | '' = '';
   searchText = '';
 
   private readonly searchText$ = new Subject<string>();
@@ -284,11 +245,8 @@ export class PrefixClientsComponent {
       limit: this.limit(),
       offset: this.pageIndex() * this.limit(),
     };
-    if (this.kindFilter) {
-      params['kind'] = this.kindFilter;
-    }
-    if (this.stateFilter) {
-      params['state'] = this.stateFilter;
+    if (this.statusFilter) {
+      params['status'] = this.statusFilter;
     }
     if (this.searchText) {
       params['q'] = this.searchText;
@@ -335,15 +293,8 @@ export class PrefixClientsComponent {
       });
   }
 
-  onKindChange(value: string): void {
-    this.kindFilter = value;
-    this.stateFilter = '';
-    this.pageIndex.set(0);
-    this.load();
-  }
-
-  onStateChange(value: string): void {
-    this.stateFilter = value;
+  onStatusChange(value: AddressStatus | ''): void {
+    this.statusFilter = value;
     this.pageIndex.set(0);
     this.load();
   }

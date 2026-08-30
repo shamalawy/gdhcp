@@ -142,7 +142,9 @@ export class ScopePoolsTabComponent {
       this.rows.set(
         pools.map((pool, i) => ({
           pool,
-          utilization: results[i] ? { used: results[i]!.active + results[i]!.reserved, total: results[i]!.total } : null,
+          // Amendment A20: use server's authoritative `available` field; do not recompute as
+          // total - active - reserved, which double-counts leased reservations.
+          utilization: results[i] ? { used: results[i]!.total - results[i]!.available, total: results[i]!.total } : null,
         })),
       );
       this.loading.set(false);

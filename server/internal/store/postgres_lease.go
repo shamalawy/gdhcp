@@ -70,7 +70,11 @@ func leaseReservationLaterals() string {
 	) res ON TRUE`
 }
 
-// scanLease scans one row shaped like leaseSelectCols.
+// scanLease scans one row shaped like leaseSelectCols. Used only by the DHCP
+// allocation hot path (GetLeaseByClient and GetLeaseByIP), where the result is
+// never JSON-serialized; ReservationState and AddressStatus are not set
+// (amendment A19/A20). The pool-scoped reads that DO reach JSON use
+// scanLeaseWithReservation instead.
 func scanLease(row pgx.Row) (*models.DHCPLease, error) {
 	var l models.DHCPLease
 	var mac net.HardwareAddr
@@ -158,6 +162,10 @@ func scanLeaseWithReservation(row pgx.Row) (*models.DHCPLease, error) {
 		}
 	}
 	l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	// Amendment A20: classify the address status based on binding state and
+	// reservation. A lease row always has a binding_state, so taking its address
+	// is safe -- the nil case (no lease row at all) never applies here.
+	l.AddressStatus = models.ClassifyAddressStatus(&l.BindingState, l.Reservation)
 	return &l, nil
 }
 
@@ -831,20 +839,29 @@ func (p *Postgres) ReservationByIP(ctx context.Context, poolID string, ip net.IP
 // LeaseQueryStore
 // ---------------------------------------------------------------------------
 
-// ListLeases supports filters "scope_id", "pool_id", "state" plus
-// params.Search, matched case-insensitively against the lease's IP text,
-// MAC text and client hostname so the UI's one search box covers all three
-// without the caller having to guess which field a term belongs to. Amendment
-// A19: leases include their reservation state via the reservation laterals,
-// so the UI can display pin state alongside the lease row.
+// ListLeases supports filters "scope_id", "pool_id", "state" (protocol-level binding state,
+// for API compatibility), and "status" (operator-facing address status per amendment A20).
+// Amendment A18.1: params.Search is matched case-insensitively against the lease's IP text,
+// MAC text and client hostname so the UI's one search box covers all three without the caller
+// having to guess which field a term belongs to. Amendment A19: leases include their reservation
+// state via the reservation laterals, so the UI can display pin state alongside the lease row.
+//
+// The "status" filter must stay in lockstep with models.ClassifyAddressStatus: the predicates
+// mirror the classification logic exactly, so a filter that disagrees with the chip never
+// returns rows that do not show the status the user picked.
 func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResult[*models.DHCPLease], error) {
 	limit, offset := normalizeListParams(params)
 	scopeID := nilIfEmpty(params.Filters["scope_id"])
 	poolID := nilIfEmpty(params.Filters["pool_id"])
 	state := nilIfEmpty(params.Filters["state"])
+	status := nilIfEmpty(params.Filters["status"])
 	search := nilIfEmpty(strings.TrimSpace(params.Search))
 
-	const where = `
+	// Build the base WHERE clause. The status filter requires the reservation
+	// laterals to be present in both the count and the select query, so we add
+	// them conditionally to both. When status is empty, count queries omit the
+	// laterals for performance (the status predicate never references res).
+	baseWhere := `
 		WHERE ($1::uuid IS NULL OR l.pool_id IN (SELECT id FROM dhcp_pools WHERE scope_id = $1))
 			AND ($2::uuid IS NULL OR l.pool_id = $2)
 			AND ($3::text IS NULL OR l.binding_state = $3)
@@ -854,8 +871,40 @@ func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResul
 				OR COALESCE(l.client_hostname, '') ILIKE '%' || $4 || '%'
 			))`
 
+	// Amendment A20: add the status filter if present. Predicates mirror
+	// ClassifyAddressStatus: abandoned > active(assigned) > enabled
+	// reservation(reserved) > free.
+	var statusClause string
+	if status != nil {
+		statusStr := status.(string)
+		switch statusStr {
+		case string(models.AddressAbandoned):
+			statusClause = ` AND l.binding_state = 'abandoned'`
+		case string(models.AddressAssigned):
+			statusClause = ` AND l.binding_state = 'active'`
+		case string(models.AddressReserved):
+			// Not active/abandoned, and an enabled reservation exists. In lease
+			// rows, this means binding_state IN ('expired', 'released').
+			statusClause = ` AND l.binding_state IN ('expired', 'released')
+				AND res.id IS NOT NULL AND res.is_enabled IS TRUE`
+		case string(models.AddressFree):
+			// No active lease, and either no reservation or it is disabled.
+			statusClause = ` AND l.binding_state IN ('expired', 'released')
+				AND (res.id IS NULL OR res.is_enabled IS NOT TRUE)`
+		}
+	}
+
+	// The select query always includes laterals (amendment A19). The count query
+	// includes laterals only when the status filter is present, since the status
+	// predicate references res.is_enabled.
+	countFrom := `FROM dhcp_leases l`
+	if status != nil {
+		countFrom += leaseReservationLaterals()
+	}
+
+	countWhere := baseWhere + statusClause
 	var total int64
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dhcp_leases l`+where, scopeID, poolID, state, search).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) `+countFrom+countWhere, scopeID, poolID, state, search).Scan(&total); err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: count leases: %w", err)
 	}
 
@@ -865,8 +914,8 @@ func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResul
 		"updated_at": "l.updated_at",
 	}, "l.ip_address ASC")
 
-	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
-		leaseReservationLaterals()+where+
+	selectFrom := `FROM dhcp_leases l` + leaseReservationLaterals()
+	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` `+selectFrom+baseWhere+statusClause+
 		` ORDER BY `+order+` LIMIT $5 OFFSET $6`, scopeID, poolID, state, search, limit, offset)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases: %w", err)
@@ -958,21 +1007,57 @@ func (p *Postgres) GetLease(ctx context.Context, id string) (*models.DHCPLease, 
 func (p *Postgres) ListLeasesByPool(ctx context.Context, poolID string, params ListParams) (ListResult[*models.DHCPLease], error) {
 	limit, offset := normalizeListParams(params)
 	state := nilIfEmpty(params.Filters["state"])
+	status := nilIfEmpty(params.Filters["status"])
 	// Amendment A18.1: ListLeasesByPool was missing search support; this table
 	// now honors Search against IP text, MAC text and client hostname, exactly
-	// like ListLeases does. Amendment A19: include reservation state.
+	// like ListLeases does. Amendment A19: include reservation state. Amendment A20:
+	// support the "status" filter for operator-facing address status.
 	search := nilIfEmpty(strings.TrimSpace(params.Search))
 
-	const where = `WHERE pool_id = $1
-		AND ($2::text IS NULL OR binding_state = $2)
-		AND ($3::text IS NULL OR (
-			host(ip_address) ILIKE '%' || $3 || '%'
-			OR COALESCE(client_mac::text, '') ILIKE '%' || $3 || '%'
-			OR COALESCE(client_hostname, '') ILIKE '%' || $3 || '%'
-		))`
+	// Build the base WHERE clause shared by count and select.
+	baseWhere := `
+		WHERE pool_id = $1
+			AND ($2::text IS NULL OR binding_state = $2)
+			AND ($3::text IS NULL OR (
+				host(ip_address) ILIKE '%' || $3 || '%'
+				OR COALESCE(client_mac::text, '') ILIKE '%' || $3 || '%'
+				OR COALESCE(client_hostname, '') ILIKE '%' || $3 || '%'
+			))`
 
+	// Amendment A20: add the status filter if present. Predicates mirror
+	// ClassifyAddressStatus: abandoned > active(assigned) > enabled
+	// reservation(reserved) > free. In ListLeasesByPool, we use unaliased column
+	// names in the base WHERE (not "l." prefix) so need to do the same here.
+	var statusClause string
+	if status != nil {
+		statusStr := status.(string)
+		switch statusStr {
+		case string(models.AddressAbandoned):
+			statusClause = ` AND binding_state = 'abandoned'`
+		case string(models.AddressAssigned):
+			statusClause = ` AND binding_state = 'active'`
+		case string(models.AddressReserved):
+			// Not active/abandoned, and an enabled reservation exists. In lease
+			// rows, this means binding_state IN ('expired', 'released').
+			statusClause = ` AND binding_state IN ('expired', 'released')
+				AND res.id IS NOT NULL AND res.is_enabled IS TRUE`
+		case string(models.AddressFree):
+			// No active lease, and either no reservation or it is disabled.
+			statusClause = ` AND binding_state IN ('expired', 'released')
+				AND (res.id IS NULL OR res.is_enabled IS NOT TRUE)`
+		}
+	}
+
+	// The count query includes laterals only when the status filter is present,
+	// since the status predicate references res.is_enabled.
+	countFrom := `FROM dhcp_leases`
+	if status != nil {
+		countFrom += ` l` + leaseReservationLaterals()
+	}
+
+	countWhere := baseWhere + statusClause
 	var total int64
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dhcp_leases `+where,
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) `+countFrom+countWhere,
 		poolID, state, search).Scan(&total); err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: count leases in pool %s: %w", poolID, err)
 	}
@@ -983,8 +1068,9 @@ func (p *Postgres) ListLeasesByPool(ctx context.Context, poolID string, params L
 		"updated_at": "l.updated_at",
 	}, "l.ip_address ASC")
 
-	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
-		leaseReservationLaterals()+` `+where+
+	// The select query always includes laterals (amendment A19).
+	selectFrom := `FROM dhcp_leases l` + leaseReservationLaterals()
+	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` `+selectFrom+baseWhere+statusClause+
 		` ORDER BY `+order+` LIMIT $4 OFFSET $5`, poolID, state, search, limit, offset)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases in pool %s: %w", poolID, err)

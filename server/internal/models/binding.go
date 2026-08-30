@@ -323,6 +323,12 @@ type DHCPClient struct {
 	ReservationState LeaseReservationState `json:"reservation_state"`
 	Reservation      *LeaseReservation     `json:"reservation"`
 
+	// AddressStatus is amendment A20's single operator-facing status. Carried
+	// here for the same reason ReservationState is: the IPAM clients table and
+	// the DHCP leases table must render one field rather than each deriving a
+	// status of its own from binding_state.
+	AddressStatus AddressStatus `json:"address_status"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

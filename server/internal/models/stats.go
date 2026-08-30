@@ -69,6 +69,21 @@ type PrefixUtilization struct {
 	UtilizationPercentage float64 `json:"pct"`
 	ScopeCount            int     `json:"scope_count"`
 
+	// Subnet accounting (amendment A20). A subnet is one broadcast domain, so
+	// every address in it is accounted for exactly once:
+	//
+	//	SpaceTotal = ReservedInfra + StaticTotal + PoolTotal
+	//
+	// Total above is PoolTotal's old name and still carries the DHCP-pool
+	// figure, so a subnet page can show both the pool rollup and the subnet it
+	// sits inside without either wearing the other's label.
+	//
+	// Zero for aggregates and containers, which hold prefixes rather than
+	// hosts -- there the address-space view below is the meaningful one.
+	ReservedInfra int64 `json:"reserved_infra"`
+	PoolTotal     int64 `json:"pool_total"`
+	StaticTotal   int64 `json:"static_total"`
+
 	// Address-space view.
 	SpaceTotal       int64   `json:"space_total"`
 	SpaceAllocated   int64   `json:"space_allocated"`

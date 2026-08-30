@@ -509,3 +509,142 @@ leases come first — children are the structure, addresses are the detail.
 
 A2's CLI verb list: the `lease` verb gains a `PINNED` column to the leases table (no new verbs).
 
+## A20. Address status, one row per address, subnet accounting
+Added after A19. Four concurrent defects infected the client and utilization surfaces, all rooted
+in using the DHCP protocol binding state as an operator-visible status. This amendment replaces it with a
+single status vocabulary, fixes the duplicate-row defect in the IPAM clients listing, corrects
+utilization rollups for subnets, and establishes stable pagination.
+
+### A20.1 Address status replaces binding-state rendering
+`LeaseBindingState` enumerates DHCP protocol facts, not an address status: `released` and `expired`
+are operationally identical to the allocator (both cause `claimLeaseIP` to reclaim the address with
+one `binding_state IN ('expired', 'released')` clause), yet the UI rendered them as two distinct
+coloured conditions. The utilization panel on the same page already counted both as free, but the
+leases table showed two different statuses — giving operators the false impression that 'released'
+and 'expired' required different handling.
+
+The single operator-facing status vocabulary is `AddressStatus`:
+
+| Status | Binding State(s) | Meaning |
+| --- | --- | --- |
+| `free` | `released`, `expired`, or no lease | Address is available; claimLeaseIP reclaims expired/released. |
+| `assigned` | `active` | A client currently holds this address. |
+| `reserved` | enabled reservation, no active lease | Address is held for a client not currently on it. |
+| `abandoned` | `abandoned` | Held back after a conflict; claimLeaseIP refuses to reclaim it. |
+
+`models.ClassifyAddressStatus` is the SOLE definition of this mapping, called by both Postgres and
+the mock store (exactly as A19.3 established for reservation state). A DISABLED reservation (`is_enabled
+= false`) deliberately does not make an address reserved — `scanCandidateIPs` filters `AND is_enabled`,
+so a disabled reservation holds nothing and the address remains free.
+
+Both `models.DHCPLease` and `models.DHCPClient` carry an `AddressStatus` field populated on read; the
+CLI and web surfaces render this field in place of the raw binding state.
+
+### A20.2 One row per address in GET /prefixes/{id}/clients
+Amendment A17.6 defined the response as a UNION of leases and reservations: the same query that
+brought back enabled reservations also brought back any lease for that address. When an address had
+both a lease and an enabled reservation, the client returned TWO rows — which made "pin this lease"
+appear to ADD a duplicate row rather than link the existing lease to a reservation. Both rows carried
+the same IP but different `kind` values (`lease` vs. `reservation`).
+
+The reservation branch is now ANTI-JOINED on address identity: `NOT EXISTS (SELECT 1 FROM dhcp_leases
+WHERE pool_id = res.pool_id AND ip_address = res.reserved_ip)`. This ensures one address yields at
+most one row. A lease row that has a reservation association surfaces `ReservationState` and
+`Reservation` fields (amendment A19), so the single row carries both pieces of information.
+
+This anti-join does NOT collapse a client holding one address while pinned to a different one: those
+are genuinely two addresses, so two rows. A collapsed reservation row loses the reservation's own
+`hostname`, `description` and `created_at` — still available on the pool's Reservations tab — but
+gains `address_status` from the system status enum (A20.1), which the UI renders uniformly.
+
+Disabled reservations are now admitted to the listing (UNION does not filter `is_enabled`), so operators
+can see and re-enable them. The response structure remains unchanged: a disabled reservation carries
+`is_enabled = false` and `ReservationState` set by ClassifyLeaseReservation (which handles disabled ones
+— see A19.2).
+
+The `kind` filter is redefined: it now predicts over the row rather than its provenance. `kind=lease`
+selects rows where `BindingState IS NOT NULL` (came from a lease). `kind=reservation` selects rows where
+`BindingKey IS NOT NULL` (came from a reservation). These predicates now OVERLAP rather than partition —
+a row with both a lease and a reservation matches both filters (though the anti-join ensures no single row
+comes from both branches at once).
+
+### A20.3 Address status filtering (store layer, API layer pending)
+The store implementations are ready for a `status` filter alongside the existing `state` filter,
+distinguished:
+
+- `state` is protocol-level: `active|expired|released|abandoned`. It applies only to leases (reservations
+  have no binding state) and may be omitted.
+- `status` is operator-level: `free|assigned|reserved|abandoned`. It applies to both leases and
+  reservations, and its SQL predicates MUST stay in lockstep with `models.ClassifyAddressStatus`, the
+  sole definition. A row matches `status=free` when `ClassifyAddressStatus(state, reservation)` returns
+  `AddressFree`, and so on.
+
+Postgres's WHERE clause for status filtering must replicate the same precedence `ClassifyAddressStatus`
+implements (see postgres_lease.go and postgres_ipam.go WHERE clause comments). The mock store must also
+classify each row identically (see mock.go). Any divergence is a correctness defect.
+
+The API handlers (`leases/handler.go` and `ipam/clients.go`) have not yet been updated to expose the
+status filter to HTTP clients; they currently parse only `state`, `kind`, and `q` parameters. Once the
+handlers are updated to include `status` in their `ParseListParams` call, the `status` query parameter
+will become available to API clients (web UI, CLI, etc.). The store layer is ready and waiting.
+
+### A20.4 Subnet accounting
+**THE GOVERNING RULE: a subnet is one broadcast domain — an address space of 2^(32-len) — and DHCP
+pools are a subset WITHIN it.** Amendment A16.3's "two views" model is correct only for aggregates and
+containers, which hold prefixes rather than hosts. A subnet page accounts over the WHOLE subnet.
+
+The concrete defect: a /24 showed `space_total=256`, `usableHosts()=254`, and a bare "total" label of
+`201` (the pool range). The 53 addresses inside the subnet but outside any pool were counted nowhere,
+and narrowing a pool's range would LOWER the subnet's utilization pct — as if the subnet had shrunk rather
+than the pool.
+
+The utilization model now segregates subnet space into three non-overlapping pieces:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `reserved_infra` | 2 (or 0 for /31,/32) | Network and broadcast addresses. |
+| `pool_total` | 50 | Addresses inside DHCP pools in this subnet. |
+| `static_total` | 204 | Addresses inside the subnet but outside every pool. |
+
+**INVARIANT: `reserved_infra + static_total + pool_total == space_total`**, always. For a /24,
+256 = 2 + 204 + 50. These three fields appear on subnets only; they are zero for aggregates and
+containers (which contain prefixes, not addresses).
+
+A subnet's cached `utilization_percentage` is now recomputed over the whole subnet (not just the pool
+range): `(active_leases + reserved_unl leased) / pool_total * 100`. Narrowing a pool's range raises
+`static_total` and lowers `pool_total`, holding `space_total` and the pct constant. A subnet's available
+addresses are `pool_total - (active + reserved_unleased)`, only the addresses the DHCP pool can allocate.
+The 53 static addresses are never in the available count — they are outside every pool and the DHCP engine
+never touches them.
+
+### A20.5 Utilization must not be recomputed in templates
+`PrefixUtilization.Available` is `total - active - reserved_unleased` and is the authoritative
+available-address count. Four screens summed `active + reserved` (ALL enabled reservations) and
+computed `used = active + reserved`, then `available = total - used`. A leased reservation counted
+twice (once in `active`, once in `reserved`), so `used` could exceed `total`, and templates' own
+`available` could go NEGATIVE. The utilization bar masked this with `Math.min(100, ...)`, hiding a data
+integrity problem.
+
+Binding: **Available must never be recomputed in a template.** Every page must render
+`PrefixUtilization.Available` as-is from the server. It has already accounted for the lease-bound
+reservation correctly.
+
+### A20.6 Pagination: stable sort order
+`GET /prefixes/{id}/clients` ORDER BY had no tiebreaker — only `ip_address`, `lease_end` and
+`client_hostname`. `ip_address` is not unique across scopes in a subtree, `lease_end` is NULL for
+every reservation row (and identical for leases renewed as a batch), and `client_hostname` is
+nullable and often duplicate. Rows could repeat or vanish across pages as the query plan shifted
+at random.
+
+A stable id tiebreaker is now required on EVERY sort: `ORDER BY <primary>, id` ensures rows stay in
+order across pagination. The id is the lease id (for lease rows) or reservation id (for reservation
+rows) — both guaranteed unique within the result set.
+
+### A20.7 Frontend rendering
+One status vocabulary, defined once in `web/src/app/shared/components/address-status/`, renders
+AddressStatus identically everywhere the API surfaces it. The pin vocabulary from A19.7 remains
+separate and unchanged.
+
+A2's CLI: the `lease` and `prefix clients` commands' binding-state columns are replaced with
+AddressStatus columns, using the same `ClassifyAddressStatus` logic as the API so all surfaces agree.
+

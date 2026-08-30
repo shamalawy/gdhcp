@@ -409,13 +409,18 @@ type IPAMAdminStore interface {
 	GetPrefixUtilization(ctx context.Context, prefixID string) (*models.PrefixUtilization, error)
 
 	// ListClientsUnderPrefix returns a paginated list of DHCP clients (leases
-	// and enabled reservations) living in prefixID or any of its descendant
-	// prefixes. Clients are returned as models.DHCPClient (a union row with
-	// kind "lease" or "reservation"). Supports filters: "kind" (lease|
-	// reservation), "state" (binding state for leases), and "q" (free-text
-	// search across IP/MAC/hostname). Supports sorts: ip_address (default),
-	// lease_end, client_mac, client_hostname. Used for GET /api/v1/prefixes/
-	// {prefix_id}/clients.
+	// and reservations, both enabled and disabled) living in prefixID or any
+	// of its descendant prefixes. The list yields ONE ROW PER ADDRESS: if an
+	// address holds both a lease and a reservation, only the lease row is
+	// returned (omitting the reservation) to avoid duplication. Clients are
+	// returned as models.DHCPClient (a union row with kind "lease" or
+	// "reservation"). Supports filters: "kind" (lease|reservation), "state"
+	// (binding_state for leases; the protocol-level filter), "status"
+	// (free|assigned|reserved|abandoned; the operator-facing classification),
+	// and "q" (free-text search across IP/MAC/hostname). Supports sorts:
+	// ip_address (default), lease_end, client_mac, client_hostname, each with
+	// an id tiebreaker for deterministic pagination. Used for GET /api/v1/
+	// prefixes/{prefix_id}/clients.
 	ListClientsUnderPrefix(ctx context.Context, prefixID string, params ListParams) (ListResult[*models.DHCPClient], error)
 }
 
@@ -524,11 +529,17 @@ type ReservationStore interface {
 // "read-only" in that endpoints.md heading is now scoped to the listing
 // routes only.
 type LeaseQueryStore interface {
-	// ListLeases supports filters "scope_id", "pool_id", "state" plus
+	// ListLeases supports filters "scope_id", "pool_id", "state" (binding_state;
+	// the protocol-level filter), and "status" (free|assigned|reserved|
+	// abandoned; the operator-facing classification, amendment A20), plus
 	// ListParams.Search, matched as a case-insensitive substring against
 	// the lease's IP, MAC and client hostname.
 	ListLeases(ctx context.Context, params ListParams) (ListResult[*models.DHCPLease], error)
 	GetLease(ctx context.Context, id string) (*models.DHCPLease, error)
+	// ListLeasesByPool supports filter "state" (binding_state; the protocol-level
+	// filter) and "status" (free|assigned|reserved|abandoned; the operator-facing
+	// classification, amendment A20), plus ListParams.Search, matched as a
+	// case-insensitive substring against the lease's IP, MAC and client hostname.
 	ListLeasesByPool(ctx context.Context, poolID string, params ListParams) (ListResult[*models.DHCPLease], error)
 
 	// GetLeaseByIPGlobal looks up a lease by IP across all pools, for

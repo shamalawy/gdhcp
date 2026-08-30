@@ -9,6 +9,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { Router, RouterLink } from '@angular/router';
 
 import { ApiService } from '../../shared/api.service';
+import { AddressStatusChipComponent } from '../../shared/components/address-status/address-status.component';
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
@@ -34,6 +35,7 @@ import {
   imports: [
     DatePipe,
     RouterLink,
+    AddressStatusChipComponent,
     EmptyStateComponent,
     PageHeaderComponent,
     PinChipComponent,
@@ -95,8 +97,14 @@ import {
 
       <div class="gdhcp-card">
         <dl class="facts">
-          <dt>State</dt>
-          <dd><span class="gdhcp-state-chip" [class]="'state-' + l.binding_state">{{ l.binding_state }}</span></dd>
+          <dt>Status</dt>
+          <dd><app-address-status-chip [status]="l.address_status" /></dd>
+
+          <dt>DHCP binding</dt>
+          <dd>
+            <span class="gdhcp-state-chip" [class]="'state-' + l.binding_state">{{ l.binding_state }}</span>
+            <span class="dhcp-binding-explain">The protocol-level binding state; released and expired both mean the address is free.</span>
+          </dd>
 
           <dt>Reservation</dt>
           <dd>
@@ -191,6 +199,13 @@ import {
       }
 
       /* gdhcp-state-chip is a global utility class defined in styles.scss. */
+
+      .dhcp-binding-explain {
+        display: block;
+        font-size: 12px;
+        color: var(--text-secondary);
+        margin-top: 4px;
+      }
 
       .reservation-link {
         display: inline-block;

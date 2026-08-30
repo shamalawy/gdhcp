@@ -54,7 +54,15 @@ import { PREFIX_TYPE_META } from '../util/prefix-type.util';
                 [compact]="true"
               />
             } @else {
-              <span class="gdhcp-muted">—</span>
+              <!-- Amendment A20: GET /prefixes does not return space_pct, so a
+                   container with no DHCP beneath it has no number to show here
+                   without a per-row request. The prefix's own page shows its
+                   address-space breakdown. -->
+              <span
+                class="gdhcp-muted"
+                matTooltip="No DHCP scope on or beneath this prefix. Open it to see its address-space breakdown."
+                >—</span
+              >
             }
           </td>
         </ng-container>

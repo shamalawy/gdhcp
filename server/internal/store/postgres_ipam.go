@@ -658,11 +658,18 @@ const clientsCTE = `
 		FROM dhcp_reservations r
 		JOIN dhcp_pools po ON po.id = r.pool_id
 		JOIN dhcp_scopes s ON s.id = po.scope_id
-		-- Only enabled reservations appear here; a disabled reservation is invisible to allocation
-		-- (it neither holds an address nor blocks anyone), so it does not show as a row in ListClientsUnderPrefix.
-		-- The lease branch can report pinned_disabled when a reservation matches a lease but is disabled;
-		-- ClassifyLeaseReservation handles that case.
-		WHERE s.ipam_prefix_id IN (SELECT id FROM descendants) AND r.is_enabled
+		-- Amendment A20: admit all reservations, enabled or disabled. The enabled filter was dropped
+		-- so disabled reservations appear in the table and can be found/re-enabled from IPAM.
+		-- A disabled reservation holds nothing and rows classify as "free" with pinned_disabled,
+		-- which is the honest rendering per amendment A20. The reservation_is_enabled column carries
+		-- the real r.is_enabled value, not an assumed TRUE.
+		-- Amendment A20: anti-join to prevent a row when the address already has a lease for this pool.
+		-- This prevents duplicates when one client holds an address with both a lease and a reservation
+		-- covering it. Keyed on address identity (pool_id + ip_address), not reservation matching:
+		-- a client pinned to .65 while holding .66 must still produce two rows for two different addresses.
+		WHERE s.ipam_prefix_id IN (SELECT id FROM descendants)
+			AND NOT EXISTS (SELECT 1 FROM dhcp_leases l2
+							WHERE l2.pool_id = r.pool_id AND l2.ip_address = r.reserved_ip)
 	)`
 
 func scanDHCPClient(row pgx.Row) (*models.DHCPClient, error) {
@@ -725,6 +732,10 @@ func scanDHCPClient(row pgx.Row) (*models.DHCPClient, error) {
 		}
 	}
 	c.ReservationState = models.ClassifyLeaseReservation(c.Reservation)
+	// Amendment A20: compute the operator-facing address status. c.BindingState is
+	// already a *LeaseBindingState (nil for reservation-only rows), which is exactly
+	// the nil case ClassifyAddressStatus expects.
+	c.AddressStatus = models.ClassifyAddressStatus(c.BindingState, c.Reservation)
 	return &c, nil
 }
 
@@ -761,6 +772,31 @@ func (p *Postgres) ListClientsUnderPrefix(ctx context.Context, prefixID string, 
 		args = append(args, state)
 		addCond(fmt.Sprintf("binding_state = $%d", len(args)))
 	}
+	// Amendment A20: status filter for the operator-facing AddressStatus,
+	// implemented as SQL predicates that mirror ClassifyAddressStatus EXACTLY.
+	// Must stay in lockstep with models.ClassifyAddressStatus: if the two disagree,
+	// filtering by a status returns rows that do not show that status.
+	if status := params.Filters["status"]; status != "" {
+		switch status {
+		case "assigned":
+			// assigned -> binding_state = 'active'
+			args = append(args, string(models.LeaseStateActive))
+			addCond(fmt.Sprintf("binding_state = $%d", len(args)))
+		case "abandoned":
+			// abandoned -> binding_state = 'abandoned'
+			args = append(args, string(models.LeaseStateAbandoned))
+			addCond(fmt.Sprintf("binding_state = $%d", len(args)))
+		case "reserved":
+			// reserved -> binding_state IS DISTINCT FROM 'active' AND binding_state IS DISTINCT FROM 'abandoned'
+			// AND reservation_is_enabled IS TRUE
+			args = append(args, string(models.LeaseStateActive), string(models.LeaseStateAbandoned))
+			addCond(fmt.Sprintf("binding_state IS DISTINCT FROM $%d AND binding_state IS DISTINCT FROM $%d AND reservation_is_enabled IS TRUE", len(args)-1, len(args)))
+		case "free":
+			// free -> the complement: not assigned, not abandoned, not reserved
+			args = append(args, string(models.LeaseStateActive), string(models.LeaseStateAbandoned))
+			addCond(fmt.Sprintf("binding_state IS DISTINCT FROM $%d AND binding_state IS DISTINCT FROM $%d AND (reservation_is_enabled IS NOT TRUE)", len(args)-1, len(args)))
+		}
+	}
 	// The handler exposes free text as the "q" filter; ParseListParams also
 	// fills Search from a "search" query param. Accept either.
 	q := params.Filters["q"]
@@ -785,6 +821,11 @@ func (p *Postgres) ListClientsUnderPrefix(ctx context.Context, prefixID string, 
 		"client_mac":      "client_mac",
 		"client_hostname": "client_hostname",
 	}, "ip_address ASC")
+	// Amendment A20: pagination tiebreaker. ip_address is not unique across scopes
+	// in one subtree, and lease_end is NULL for every reservation row. Append a
+	// stable `, id ASC` to ORDER BY for every sort option so rows cannot repeat
+	// or vanish across LIMIT/OFFSET pages.
+	order = order + ", id ASC"
 
 	args = append(args, limit, offset)
 	rows, err := p.pool.Query(ctx, clientsCTE+` SELECT `+clientSelectCols+` FROM clients`+where+

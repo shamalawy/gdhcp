@@ -25,7 +25,7 @@ func Clients(st store.Store, log *slog.Logger) http.HandlerFunc {
 		}
 
 		// Parse list parameters: support kind, state, q filters.
-		params := httpx.ParseListParams(r, "kind", "state", "q")
+		params := httpx.ParseListParams(r, "kind", "state", "status", "q")
 
 		// Query the store for clients under this prefix and its descendants.
 		result, err := st.ListClientsUnderPrefix(r.Context(), prefixID, params)

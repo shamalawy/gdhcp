@@ -9,10 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Address status now replaces binding state rendering across all surfaces: AddressStatus (free/assigned/reserved/abandoned) folds `released` and `expired` into `free` where the allocator treats them identically (amendment A20)
+- IPAM clients listing no longer shows duplicate rows when an address has both a lease and an enabled reservation; the lease row carries the reservation state (amendment A20)
+- Subnet utilization now properly accounts for whole-subnet address space: reserved_infra (network/broadcast) + pool_total (addresses in DHCP pools) + static_total (in-subnet but outside pools) = space_total; pool narrowing no longer changes subnet utilization pct (amendment A20)
+- Utilization double-count fixed: Available is now authoritative and must never be recomputed from active + reserved in templates (amendment A20)
+- Client listing pagination now includes stable `id` tiebreaker on every sort to prevent row repetition across pages (amendment A20)
+- Disabled reservations are now visible in IPAM clients listing so operators can see and re-enable them (amendment A20)
+- CLI `lease list` and `prefix clients` commands now show `STATUS` column (AddressStatus) instead of raw binding state (amendment A20)
+- Address status filtering is implemented in the store layer (Postgres and mock); API handlers are ready to expose `status` filter when updated
 - Reservation state is now visible in lease reads: DHCP and IPAM leases tables show whether a client is pinned, and with which address if pinned elsewhere (amendment A19)
-- CLI `lease` command now shows a `PINNED` column in the leases table
-- Store now rejects duplicate reservations on the same address in a pool with `ErrReservationIPTaken`
-- `PUT /reservations/{id}` now accepts optional `reserved_ip` field and treats absent fields as "leave alone", fixing enable/disable toggles that were erasing hostname and description
+- CLI `lease` command now shows a `PINNED` column in the leases table (amendment A19)
+- Store now rejects duplicate reservations on the same address in a pool with `ErrReservationIPTaken` (amendment A19)
+- `PUT /reservations/{id}` now accepts optional `reserved_ip` field and treats absent fields as "leave alone", fixing enable/disable toggles that were erasing hostname and description (amendment A19)
 - Error messages for reservation conflicts are now sentences, not Postgres constraint names (amendment A19)
 
 ## [0.1.0] - 2026-08-30

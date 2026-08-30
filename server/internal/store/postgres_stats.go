@@ -248,9 +248,27 @@ type utilizationTotals struct {
 }
 
 // toUtilization converts the raw aggregate into the API-facing shape.
+// This is the pool-level/scope-level utilization view (not subnet-level;
+// amendment A20 handles subnets separately in SampleUtilization).
+//
 // Available excludes both active leases and reservations that aren't
 // currently leased (a leased reservation is already excluded via active),
 // matching scanCandidateIPs' (postgres_lease.go) exact candidacy test.
+//
+// IMPORTANT: Reserved and Available are asymmetric by design. Reserved
+// reports every enabled reservation in the pool (reservedTotal), regardless
+// of whether a lease currently sits on it. Available subtracts only
+// unleased reservations (reservedUnleased), because a leased reservation
+// is already accounted for in Active. This means:
+//   - Reserved counts a reservation once: its existence
+//   - Available counts all addresses not claimed by active leases or free
+//     reservations (those truly available to new DHCP clients)
+//   - A reservation that becomes leased does NOT reduce Available further
+//     (the lease's IP was already counted in Active)
+//
+// Frontends computing "used" must use (Active + ReservedUnleased), not
+// (Active + Reserved), or they will miscount leased reservations.
+// Available is the authoritative free-address count.
 func (t utilizationTotals) toUtilization(entityType models.UtilizationEntityType, entityID string) *models.Utilization {
 	available := t.total - t.active - t.reservedUnleased
 	if available < 0 {
@@ -399,6 +417,54 @@ func (p *Postgres) GetPrefixUtilization(ctx context.Context, prefixID string) (*
 	}
 	u := t.toUtilization(models.UtilizationEntityPrefix, prefixID)
 	pu.Total, pu.Active, pu.Reserved, pu.Available, pu.UtilizationPercentage = u.Total, u.Active, u.Reserved, u.Available, u.UtilizationPercentage
+
+	// Amendment A20: populate subnet accounting fields. For a SUBNET, partition
+	// the entire address space into infrastructure (network/broadcast), pools,
+	// and static addresses outside pools. For aggregates and containers, these
+	// are zero (the child-prefix space view is the meaningful measure).
+	var prefixType string
+	var prefixStr string
+	if err := p.pool.QueryRow(ctx, `
+		SELECT prefix_type, prefix::text FROM ipam_prefixes WHERE id = $1
+	`, prefixID).Scan(&prefixType, &prefixStr); err != nil {
+		return nil, fmt.Errorf("store: get prefix utilization %s: prefix type: %w", prefixID, err)
+	}
+
+	if prefixType == "subnet" {
+		// Calculate reserved infrastructure addresses (network and broadcast).
+		// RFC 3021 (/31 and /32) have no reserved addresses.
+		var maskLen int
+		if err := p.pool.QueryRow(ctx, `SELECT masklen($1::inet)`, prefixStr).Scan(&maskLen); err != nil {
+			return nil, fmt.Errorf("store: get prefix utilization %s: masklen: %w", prefixID, err)
+		}
+		if maskLen < 31 {
+			pu.ReservedInfra = 2
+		} else {
+			pu.ReservedInfra = 0
+		}
+
+		// PoolTotal: addresses inside DHCP pools ON THIS PREFIX ONLY (not descendants).
+		// This is the sum of usable addresses in pools whose scope is bound to this prefix.
+		if err := p.pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(
+				(po.range_end - po.range_start + 1)
+					- (CASE WHEN set_masklen(network(sc.network::inet), 32) BETWEEN po.range_start AND po.range_end THEN 1 ELSE 0 END)
+					- (CASE WHEN set_masklen(broadcast(sc.network::inet), 32) BETWEEN po.range_start AND po.range_end THEN 1 ELSE 0 END)
+			), 0)
+			FROM dhcp_pools po
+			JOIN dhcp_scopes sc ON sc.id = po.scope_id
+			WHERE sc.ipam_prefix_id = $1
+		`, prefixID).Scan(&pu.PoolTotal); err != nil {
+			return nil, fmt.Errorf("store: get prefix utilization %s: pool total: %w", prefixID, err)
+		}
+
+		// StaticTotal: addresses not in any pool, clamped at zero in case a
+		// pathological configuration has pools exceeding the subnet space.
+		pu.StaticTotal = pu.SpaceTotal - pu.ReservedInfra - pu.PoolTotal
+		if pu.StaticTotal < 0 {
+			pu.StaticTotal = 0
+		}
+	}
 
 	return pu, nil
 }
@@ -559,20 +625,33 @@ func (p *Postgres) SampleUtilization(ctx context.Context) error {
 		directAgg[sa.ipamPrefixID] = d
 	}
 
-	prefixRows, err := p.pool.Query(ctx, `SELECT id, parent_id FROM ipam_prefixes`)
+	prefixRows, err := p.pool.Query(ctx, `
+		SELECT id, parent_id, prefix_type, prefix::text,
+			broadcast(prefix::inet) - network(prefix::inet) + 1
+		FROM ipam_prefixes
+	`)
 	if err != nil {
 		return fmt.Errorf("store: sample utilization: query prefixes: %w", err)
 	}
 	var allPrefixIDs []string
 	children := make(map[string][]string)
+	type prefixMeta struct {
+		prefixType string
+		prefixStr  string
+		spaceTotal int64
+	}
+	prefixInfo := make(map[string]prefixMeta)
 	for prefixRows.Next() {
 		var id string
 		var parentID *string
-		if err := prefixRows.Scan(&id, &parentID); err != nil {
+		var prefixType, prefixStr string
+		var spaceTotal int64
+		if err := prefixRows.Scan(&id, &parentID, &prefixType, &prefixStr, &spaceTotal); err != nil {
 			prefixRows.Close()
 			return fmt.Errorf("store: sample utilization: scan prefix: %w", err)
 		}
 		allPrefixIDs = append(allPrefixIDs, id)
+		prefixInfo[id] = prefixMeta{prefixType, prefixStr, spaceTotal}
 		if parentID != nil {
 			children[*parentID] = append(children[*parentID], id)
 		}
@@ -610,9 +689,34 @@ func (p *Postgres) SampleUtilization(ctx context.Context) error {
 		// it per node. NULL only when no descendant (or the prefix itself)
 		// has a scope at all; a scope with zero pools still resolves to 0,
 		// distinguishing "empty" from "never had a scope".
+		// Amendment A20: for SUBNETs, the percentage reflects address utilization
+		// relative to the entire subnet space, not pool space. This means adding a
+		// pool to a subnet does not change the percentage — it only shifts addresses
+		// from static to pool accounting. For aggregates and containers, the
+		// percentage is the pool rollup (child-block utilization).
+		meta := prefixInfo[id]
 		if agg.scopeCount > 0 {
-			pct := int(math.Round(u.UtilizationPercentage))
-			batch.Queue(`UPDATE ipam_prefixes SET utilization_percentage = $1 WHERE id = $2`, pct, id)
+			var pct float64
+			if meta.prefixType == "subnet" {
+				// Calculate ReservedInfra based on prefix length (RFC 3021).
+				var maskLen int
+				if err := p.pool.QueryRow(ctx, `SELECT masklen($1::inet)`, meta.prefixStr).Scan(&maskLen); err != nil {
+					return fmt.Errorf("store: sample utilization: masklen for %s: %w", id, err)
+				}
+				var reservedInfra int64
+				if maskLen < 31 {
+					reservedInfra = 2
+				}
+				usableSubnetAddresses := meta.spaceTotal - reservedInfra
+				if usableSubnetAddresses > 0 {
+					pct = float64(agg.t.active+agg.t.reservedUnleased) / float64(usableSubnetAddresses) * 100
+				}
+			} else {
+				// Aggregate or container: use the pool rollup percentage.
+				pct = u.UtilizationPercentage
+			}
+			pctInt := int(math.Round(pct))
+			batch.Queue(`UPDATE ipam_prefixes SET utilization_percentage = $1 WHERE id = $2`, pctInt, id)
 		} else {
 			batch.Queue(`UPDATE ipam_prefixes SET utilization_percentage = NULL WHERE id = $1`, id)
 		}
@@ -671,6 +775,9 @@ func (p *Postgres) GetDashboardStats(ctx context.Context, window time.Duration) 
 	s.TotalActiveLeases = u.Active
 	s.TotalReservedAddresses = u.Reserved
 	s.TotalAvailableAddresses = u.Available
+	// OverallUtilizationPercentage is pool-level DHCP utilization across all
+	// pools system-wide: active leases / sum of all pool ranges. This is the
+	// right denominator for a system-level dashboard (amendment A20, task C).
 	s.OverallUtilizationPercentage = u.UtilizationPercentage
 
 	if window <= 0 {
@@ -705,7 +812,10 @@ func (p *Postgres) GetDashboardStats(ctx context.Context, window time.Duration) 
 }
 
 // topUtilizedScopes returns the limit scopes with the highest current
-// utilization percentage, for GetDashboardStats.TopUtilizedScopes.
+// utilization percentage, for GetDashboardStats.TopUtilizedScopes. The
+// percentage is pool-level DHCP utilization (active leases / sum of pool
+// ranges), not subnet-level accounting. This shows which scopes are most
+// pressed for DHCP addresses (amendment A20, task C).
 func (p *Postgres) topUtilizedScopes(ctx context.Context, limit int) ([]*models.ScopeUtilizationSummary, error) {
 	rows, err := p.pool.Query(ctx, `
 		WITH pool_calc AS (

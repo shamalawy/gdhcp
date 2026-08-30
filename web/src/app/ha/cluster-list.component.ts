@@ -276,10 +276,12 @@ export class ClusterListComponent implements OnInit {
           return of<ClusterRow>({ cluster, state, servers, scopeUsed: 0, scopeTotal: 0 });
         }
         return forkJoin(
-          scopes.items.map((scope) => this.api.scopeUtilization(scope.id).pipe(catchError(() => of({ total: 0, active: 0, reserved: 0, pct: 0 })))),
+          scopes.items.map((scope) => this.api.scopeUtilization(scope.id).pipe(catchError(() => of({ total: 0, active: 0, reserved: 0, available: 0, pct: 0 })))),
         ).pipe(
           map((utils) => {
-            const scopeUsed = utils.reduce((sum, u) => sum + u.active + u.reserved, 0);
+            // Amendment A20: total - available counts each address once; active +
+            // reserved double-counts a reservation that is currently leased.
+            const scopeUsed = utils.reduce((sum, u) => sum + (u.total - u.available), 0);
             const scopeTotal = utils.reduce((sum, u) => sum + u.total, 0);
             return { cluster, state, servers, scopeUsed, scopeTotal } satisfies ClusterRow;
           }),

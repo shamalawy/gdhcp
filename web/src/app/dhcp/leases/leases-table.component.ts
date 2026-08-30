@@ -27,10 +27,11 @@ import { catchError, debounceTime, distinctUntilChanged, map, switchMap } from '
 
 import { ApiService } from '../../shared/api.service';
 import { SseService } from '../../shared/sse.service';
+import { AddressStatusChipComponent } from '../../shared/components/address-status/address-status.component';
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
-import { DHCPLease, DHCPPool, DHCPScope, LeaseAction, LeaseBindingState } from '../../shared/models';
+import { DHCPLease, DHCPPool, DHCPScope, LeaseAction, AddressStatus } from '../../shared/models';
 import { clientIdToHex } from '../shared/ip-utils';
 import { NotifyService } from '../shared/notify.service';
 import {
@@ -39,7 +40,7 @@ import {
   ReservationFormResult,
 } from '../shared/reservation-form-dialog.component';
 
-type StateFilter = LeaseBindingState | 'all';
+type StatusFilter = AddressStatus | 'all';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 250];
 
@@ -90,6 +91,7 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
   imports: [
     FormsModule,
     RouterLink,
+    AddressStatusChipComponent,
     EmptyStateComponent,
     PinChipComponent,
     PinButtonComponent,
@@ -123,12 +125,12 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
       </mat-form-field>
 
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="state-field">
-        <mat-label>State</mat-label>
-        <mat-select [ngModel]="stateFilter()" (ngModelChange)="onStateChange($event)">
-          <mat-option value="all">All states</mat-option>
-          <mat-option value="active">Active</mat-option>
-          <mat-option value="expired">Expired</mat-option>
-          <mat-option value="released">Released</mat-option>
+        <mat-label>Status</mat-label>
+        <mat-select [ngModel]="statusFilter()" (ngModelChange)="onStatusChange($event)">
+          <mat-option value="all">All</mat-option>
+          <mat-option value="free">Free</mat-option>
+          <mat-option value="assigned">Assigned</mat-option>
+          <mat-option value="reserved">Reserved</mat-option>
           <mat-option value="abandoned">Abandoned</mat-option>
         </mat-select>
       </mat-form-field>
@@ -229,7 +231,7 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
               @if (!poolId()) {
                 <th>Pool</th>
               }
-              <th>State</th>
+              <th>Status</th>
               <th>Expires in</th>
               <th>Pinned</th>
               <th class="actions"></th>
@@ -255,9 +257,9 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
                   <td>{{ poolLabel(lease.pool_id) }}</td>
                 }
                 <td>
-                  <span class="gdhcp-state-chip" [class]="'state-' + lease.binding_state">{{ lease.binding_state }}</span>
+                  <app-address-status-chip [status]="lease.address_status" />
                 </td>
-                <td>{{ lease.binding_state === 'active' ? expiresIn(lease) : '—' }}</td>
+                <td>{{ lease.address_status === 'assigned' ? expiresIn(lease) : '—' }}</td>
                 <td>
                   <app-pin-chip [state]="lease.reservation_state" [reservation]="lease.reservation" />
                 </td>
@@ -430,7 +432,7 @@ export class LeasesTableComponent {
 
   readonly searchText = signal('');
   private readonly appliedSearch = signal('');
-  readonly stateFilter = signal<StateFilter>('all');
+  readonly statusFilter = signal<StatusFilter>('all');
   readonly scopeFilter = signal('');
   readonly poolFilter = signal('');
 
@@ -475,7 +477,7 @@ export class LeasesTableComponent {
         // them refetches.
         this.poolId();
         this.appliedSearch();
-        this.stateFilter();
+        this.statusFilter();
         this.scopeFilter();
         this.poolFilter();
         this.pageIndex();
@@ -538,12 +540,12 @@ export class LeasesTableComponent {
 
   load(): void {
     this.loading.set(true);
-    const state = this.stateFilter();
+    const status = this.statusFilter();
     const search = this.appliedSearch();
     const params = {
       limit: this.pageSize(),
       offset: this.pageIndex() * this.pageSize(),
-      ...(state !== 'all' ? { state } : {}),
+      ...(status !== 'all' ? { status } : {}),
       ...(search ? { search } : {}),
     };
 
@@ -577,9 +579,9 @@ export class LeasesTableComponent {
     this.search$.next(value);
   }
 
-  onStateChange(value: StateFilter): void {
+  onStatusChange(value: StatusFilter): void {
     this.pageIndex.set(0);
-    this.stateFilter.set(value);
+    this.statusFilter.set(value);
   }
 
   onScopeChange(value: string): void {

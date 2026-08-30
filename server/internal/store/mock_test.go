@@ -491,3 +491,341 @@ func TestMockListLeasesSearch(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyAddressStatus covers amendment A20: the operator-facing
+// address status that hides protocol-level binding_state distinctions
+// (released and expired both mean free).
+func TestClassifyAddressStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		state *models.LeaseBindingState
+		res   *models.LeaseReservation
+		want  models.AddressStatus
+	}{
+		{
+			name:  "abandoned lease overrides everything",
+			state: statePtr(models.LeaseStateAbandoned),
+			res:   &models.LeaseReservation{IsEnabled: true},
+			want:  models.AddressAbandoned,
+		},
+		{
+			name:  "active lease is assigned",
+			state: statePtr(models.LeaseStateActive),
+			want:  models.AddressAssigned,
+		},
+		{
+			name:  "active lease plus reservation still assigned",
+			state: statePtr(models.LeaseStateActive),
+			res:   &models.LeaseReservation{IsEnabled: true},
+			want:  models.AddressAssigned,
+		},
+		{
+			name:  "no lease, enabled reservation is reserved",
+			state: nil,
+			res:   &models.LeaseReservation{IsEnabled: true},
+			want:  models.AddressReserved,
+		},
+		{
+			name:  "no lease, disabled reservation is free",
+			state: nil,
+			res:   &models.LeaseReservation{IsEnabled: false},
+			want:  models.AddressFree,
+		},
+		{
+			name:  "released lease is free",
+			state: statePtr(models.LeaseStateReleased),
+			want:  models.AddressFree,
+		},
+		{
+			name:  "expired lease is free",
+			state: statePtr(models.LeaseStateExpired),
+			want:  models.AddressFree,
+		},
+		{
+			name:  "no lease, no reservation is free",
+			state: nil,
+			res:   nil,
+			want:  models.AddressFree,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := models.ClassifyAddressStatus(tc.state, tc.res)
+			if got != tc.want {
+				t.Errorf("ClassifyAddressStatus = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListClientsUnderPrefixOneRowPerAddress covers amendment A20: when an
+// address holds both a lease and a reservation, only the lease row is
+// returned, avoiding duplication. For this test, we manually create a
+// scenario where both exist (since CreateReservation prevents this normally).
+func TestListClientsUnderPrefixOneRowPerAddress(t *testing.T) {
+	ctx := context.Background()
+	m := NewMock()
+
+	// Set up VRF, prefix, scope, pool with a generous range.
+	vrf := &models.VRF{Name: "test-vrf", IsDefault: false}
+	if err := m.CreateVRF(ctx, vrf); err != nil {
+		t.Fatalf("create vrf: %v", err)
+	}
+	_, prefixNet, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse prefix: %v", err)
+	}
+	ipNet := models.IPNet(*prefixNet)
+	prefix := &models.IPAMPrefix{
+		VRFID:      vrf.ID,
+		Prefix:     &ipNet,
+		PrefixType: models.PrefixTypeSubnet,
+	}
+	if err := m.CreatePrefix(ctx, prefix); err != nil {
+		t.Fatalf("create prefix: %v", err)
+	}
+
+	_, scopeNet, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse scope: %v", err)
+	}
+	scopeIPNet := models.IPNet(*scopeNet)
+	scope := &models.DHCPScope{
+		VRFID:        vrf.ID,
+		IPAMPrefixID: prefix.ID,
+		Name:         "test-scope",
+		Network:      &scopeIPNet,
+		IsEnabled:    true,
+	}
+	if err := m.CreateScope(ctx, scope); err != nil {
+		t.Fatalf("create scope: %v", err)
+	}
+
+	pool := &models.DHCPPool{
+		ScopeID:    scope.ID,
+		Name:       "test-pool",
+		RangeStart: net.ParseIP("10.0.0.10"),
+		RangeEnd:   net.ParseIP("10.0.0.250"),
+		IsEnabled:  true,
+	}
+	if err := m.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	// Allocate two leases (for different clients)
+	lease1, err := m.AllocateLease(ctx, pool.ID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, nil)
+	if err != nil {
+		t.Fatalf("allocate lease 1: %v", err)
+	}
+
+	lease2, err := m.AllocateLease(ctx, pool.ID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:02"}, nil)
+	if err != nil {
+		t.Fatalf("allocate lease 2: %v", err)
+	}
+
+	// Create a reservation for lease1's address with a different binding key.
+	// This simulates the edge case where both a lease and reservation exist
+	// for the same address (e.g., after the lease was released but the
+	// reservation wasn't). In normal operation, CreateReservation prevents
+	// this, but our mock should handle it gracefully.
+	res1 := &models.DHCPReservation{
+		PoolID:      pool.ID,
+		ReservedIP:  lease1.IPAddress,
+		BindingKey:  "mac:aa:bb:cc:dd:ee:03",
+		BindingType: models.BindingTypeMAC,
+		IsEnabled:   true,
+	}
+	// Directly add to mock's reservations map (bypassing CreateReservation's checks)
+	// to simulate the edge case where both exist
+	res1ID := "test-res-" + lease1.ID
+	res1.ID = res1ID
+	res1.PoolID = pool.ID
+	m.reservations[res1ID] = res1
+
+	// List clients under the prefix.
+	clients, err := m.ListClientsUnderPrefix(ctx, prefix.ID, ListParams{Limit: 100})
+	if err != nil {
+		t.Fatalf("list clients: %v", err)
+	}
+
+	// Verify: should return 2 leases, NOT 3 (the duplicate reservation should be skipped)
+	if len(clients.Items) != 2 {
+		t.Errorf("list clients returned %d rows, want 2 (both leases, reservation skipped)", len(clients.Items))
+		for i, c := range clients.Items {
+			t.Logf("  row %d: kind=%s, ip=%s, id=%s", i, c.Kind, c.IPAddress, c.ID)
+		}
+	}
+
+	// Verify row counts match item count
+	if clients.Total != int64(len(clients.Items)) {
+		t.Errorf("total=%d does not match items=%d", clients.Total, len(clients.Items))
+	}
+
+	// Verify the rows are for the leases, not the reservation
+	ips := make(map[string]bool)
+	for _, c := range clients.Items {
+		if c.Kind != models.ClientKindLease {
+			t.Errorf("expected lease, got %s", c.Kind)
+		}
+		ips[c.IPAddress.String()] = true
+	}
+
+	// Verify both leases are present
+	if !ips[lease1.IPAddress.String()] {
+		t.Errorf("expected lease1 at %s in results", lease1.IPAddress.String())
+	}
+	if !ips[lease2.IPAddress.String()] {
+		t.Errorf("expected lease2 at %s in results", lease2.IPAddress.String())
+	}
+}
+
+// TestListClientsUnderPrefixStatusFilter covers amendment A20: the status
+// filter separates operator-facing address classifications (free|assigned|
+// reserved|abandoned) from protocol-level details (binding_state).
+func TestListClientsUnderPrefixStatusFilter(t *testing.T) {
+	ctx := context.Background()
+	m := NewMock()
+
+	// Create a prefix and scope for this test
+	vrf := &models.VRF{Name: "test-vrf-status-filter", IsDefault: false}
+	if err := m.CreateVRF(ctx, vrf); err != nil {
+		t.Fatalf("create vrf: %v", err)
+	}
+
+	_, prefixNet, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse prefix: %v", err)
+	}
+	ipNet := models.IPNet(*prefixNet)
+	prefix := &models.IPAMPrefix{
+		VRFID:      vrf.ID,
+		Prefix:     &ipNet,
+		PrefixType: models.PrefixTypeSubnet,
+	}
+	if err := m.CreatePrefix(ctx, prefix); err != nil {
+		t.Fatalf("create prefix: %v", err)
+	}
+
+	_, scopeNet, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse scope: %v", err)
+	}
+	scopeIPNet := models.IPNet(*scopeNet)
+	scope := &models.DHCPScope{
+		VRFID:        vrf.ID,
+		IPAMPrefixID: prefix.ID,
+		Name:         "test-scope-status",
+		Network:      &scopeIPNet,
+		IsEnabled:    true,
+	}
+	if err := m.CreateScope(ctx, scope); err != nil {
+		t.Fatalf("create scope: %v", err)
+	}
+
+	pool := &models.DHCPPool{
+		ScopeID:    scope.ID,
+		Name:       "test-pool-status",
+		RangeStart: net.ParseIP("10.0.0.10"),
+		RangeEnd:   net.ParseIP("10.0.0.250"),
+		IsEnabled:  true,
+	}
+	if err := m.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	poolID := pool.ID
+
+	// Allocate an active lease (assigned status)
+	active, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, nil)
+	if err != nil {
+		t.Fatalf("allocate lease 1: %v", err)
+	}
+
+	// Allocate a second lease and mark it as abandoned (abandoned status)
+	abandoned, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:05"}, nil)
+	if err != nil {
+		t.Fatalf("allocate lease 2: %v", err)
+	}
+	if err := m.AbandonLease(ctx, abandoned.ID, "aa:bb:cc:dd:ee:05"); err != nil {
+		t.Fatalf("abandon lease: %v", err)
+	}
+
+	// Allocate a third lease and release it (free status)
+	released, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:02"}, nil)
+	if err != nil {
+		t.Fatalf("allocate lease 3: %v", err)
+	}
+	releasedIP := released.IPAddress.String() // Save the IP for later verification
+	if err := m.ReleaseLease(ctx, released.ID, "aa:bb:cc:dd:ee:02"); err != nil {
+		t.Fatalf("release lease: %v", err)
+	}
+
+	// Create an enabled reservation (reserved status) - use IP within pool range
+	res := &models.DHCPReservation{
+		PoolID:      poolID,
+		ReservedIP:  net.ParseIP("10.0.0.100"),
+		BindingKey:  "mac:aa:bb:cc:dd:ee:03",
+		BindingType: models.BindingTypeMAC,
+		IsEnabled:   true,
+	}
+	if err := m.CreateReservation(ctx, res); err != nil {
+		t.Fatalf("create reservation: %v", err)
+	}
+
+	// Create a disabled reservation (free status, not reserved) - use IP within pool range
+	disabledRes := &models.DHCPReservation{
+		PoolID:      poolID,
+		ReservedIP:  net.ParseIP("10.0.0.101"),
+		BindingKey:  "mac:aa:bb:cc:dd:ee:04",
+		BindingType: models.BindingTypeMAC,
+		IsEnabled:   false,
+	}
+	if err := m.CreateReservation(ctx, disabledRes); err != nil {
+		t.Fatalf("create disabled reservation: %v", err)
+	}
+
+	// Test each status filter
+	for _, tc := range []struct {
+		status string
+		want   []string // expected IP addresses
+	}{
+		{"assigned", []string{active.IPAddress.String()}},
+		{"free", []string{releasedIP, disabledRes.ReservedIP.String()}},
+		{"reserved", []string{res.ReservedIP.String()}},
+		{"abandoned", []string{abandoned.IPAddress.String()}},
+	} {
+		t.Run("status="+tc.status, func(t *testing.T) {
+			clients, err := m.ListClientsUnderPrefix(ctx, prefix.ID, ListParams{
+				Limit:   100,
+				Filters: map[string]string{"status": tc.status},
+			})
+			if err != nil {
+				t.Fatalf("list clients: %v", err)
+			}
+
+			var got []string
+			for _, c := range clients.Items {
+				got = append(got, c.IPAddress.String())
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("status=%s returned %d rows, want %d", tc.status, len(got), len(tc.want))
+			}
+			for _, exp := range tc.want {
+				found := false
+				for _, g := range got {
+					if g == exp {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("status=%s: expected %s in results, got %v", tc.status, exp, got)
+				}
+			}
+		})
+	}
+}
+
+// Helper function to create a pointer to a LeaseBindingState
+func statePtr(s models.LeaseBindingState) *models.LeaseBindingState {
+	return &s
+}

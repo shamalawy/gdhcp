@@ -21,7 +21,7 @@ import (
 // JSON response.
 func List(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		params := httpx.ParseListParams(r, "scope_id", "pool_id", "state")
+		params := httpx.ParseListParams(r, "scope_id", "pool_id", "state", "status")
 		res, err := st.ListLeases(r.Context(), params)
 		if err != nil {
 			httpx.RespondError(w, r, log, err)
@@ -55,7 +55,7 @@ func Get(st store.Store, log *slog.Logger) http.HandlerFunc {
 func ListByPool(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		poolID := mux.Vars(r)["pool_id"]
-		params := httpx.ParseListParams(r, "state")
+		params := httpx.ParseListParams(r, "state", "status")
 		res, err := st.ListLeasesByPool(r.Context(), poolID, params)
 		if err != nil {
 			httpx.RespondError(w, r, log, err)

@@ -126,19 +126,24 @@ func newLeaseDeleteCmd(flags *persistentFlags) *cobra.Command {
 }
 
 func leaseTable(leases []models.DHCPLease) ([]string, [][]string) {
-	headers := []string{"ID", "POOL_ID", "IP_ADDRESS", "CLIENT_MAC", "HOSTNAME", "STATE", "PINNED", "LEASE_END"}
+	headers := []string{"ID", "POOL_ID", "IP_ADDRESS", "CLIENT_MAC", "HOSTNAME", "STATUS", "PINNED", "LEASE_END"}
 	rows := make([][]string, 0, len(leases))
 	for _, l := range leases {
 		mac := "-"
 		if l.ClientMAC != nil {
 			mac = common.MAC(l.ClientMAC)
 		}
+		// Render the STATUS column with AddressStatus, the operator-facing
+		// status vocabulary that folded 'released' and 'expired' into 'free'
+		// (amendment A20). This is what the API and web UI render, so the CLI
+		// and all surfaces speak the same language.
+		status := string(l.AddressStatus)
 		// Render the PINNED column compactly and truthfully (amendment A19):
 		// "-" for not_pinned, "yes" for pinned, "off" for pinned_disabled,
 		// "->IP" for pinned_elsewhere (shows the reserved address), "other" for
 		// address_reserved (a different client's reservation on this address).
 		pinned := pinStateColumn(l)
-		rows = append(rows, []string{l.ID, l.PoolID, common.IP(l.IPAddress), mac, common.Str(l.ClientHostname), string(l.BindingState), pinned, common.Time(l.LeaseEnd)})
+		rows = append(rows, []string{l.ID, l.PoolID, common.IP(l.IPAddress), mac, common.Str(l.ClientHostname), status, pinned, common.Time(l.LeaseEnd)})
 	}
 	return headers, rows
 }

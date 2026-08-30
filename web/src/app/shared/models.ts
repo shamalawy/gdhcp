@@ -195,6 +195,13 @@ export interface PrefixUtilization {
   available: number;
   pct: number;
   scope_count: number;
+  /** A20 subnet accounting: reserved_infra + static_total + pool_total === space_total.
+   *  Zero for aggregates/containers, which hold prefixes rather than hosts. */
+  reserved_infra: number;
+  /** Addresses inside DHCP pools. Same figure as `total`, honestly named. */
+  pool_total: number;
+  /** In the subnet, outside every pool — statics, gateways, unmanaged. */
+  static_total: number;
   space_total: number;
   space_allocated: number;
   space_pct: number;
@@ -358,6 +365,7 @@ export interface UtilizationSummary {
   total: number;
   active: number;
   reserved: number;
+  available: number;
   pct: number;
 }
 
@@ -398,6 +406,27 @@ export interface UpdatePoolRequest {
 export type BindingType = 'mac' | 'client_id' | 'hostname' | 'circuit_id' | 'remote_id' | 'vendor_class' | 'user_class';
 
 export type ClientKind = 'lease' | 'reservation';
+
+/**
+ * What an address is actually doing — the only status vocabulary the UI shows.
+ * Amendment A20.
+ *
+ * `LeaseBindingState` is a DHCP protocol fact, not a status: `released` and
+ * `expired` both mean the address is free, and showing them as distinct chips
+ * claimed an address was in some special state when the allocator had already
+ * handed it back to the pool. These four values partition an address exactly
+ * the way the utilization rollup does, so a prefix's counts and its client
+ * table cannot contradict each other.
+ */
+export type AddressStatus =
+  /** Nothing holds it — no lease, or one that is released or expired. */
+  | 'free'
+  /** A client currently holds it (an active lease). */
+  | 'assigned'
+  /** An enabled reservation holds it for a client that is not on it. */
+  | 'reserved'
+  /** Held back after a conflict; the engine refuses to reallocate it. */
+  | 'abandoned';
 
 /**
  * How a lease (or an IPAM client row) relates to the reservations in its
@@ -522,6 +551,8 @@ export interface DHCPClient {
   reservation_state: LeaseReservationState;
   /** The reservation behind `reservation_state`, or null when not_pinned. */
   reservation: LeaseReservation | null;
+  /** A20: the single operator-facing status. Render this, not binding_state. */
+  address_status: AddressStatus;
 
   created_at: string;
   updated_at: string;
@@ -556,6 +587,8 @@ export interface DHCPLease {
   reservation_state: LeaseReservationState;
   /** The reservation behind `reservation_state`, or null when not_pinned. */
   reservation: LeaseReservation | null;
+  /** A20: the single operator-facing status. Render this, not binding_state. */
+  address_status: AddressStatus;
 }
 
 /** The operator actions POST /leases/bulk accepts, and that each lease

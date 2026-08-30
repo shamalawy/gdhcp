@@ -27,7 +27,7 @@ export function levelFor(pct: number): UtilizationLevel {
         <div
           class="fill"
           [class]="level()"
-          [style.width.%]="pct()"
+          [style.width.%]="barPct()"
         ></div>
       </div>
 
@@ -109,10 +109,23 @@ export class UtilizationBarComponent {
   readonly pct = computed(() => {
     const total = this.total();
     if (!total || total <= 0) return 0;
-    return Math.min(100, Math.max(0, (this.used() / total) * 100));
+    return (this.used() / total) * 100;
   });
 
-  readonly level = computed<UtilizationLevel>(() => levelFor(this.pct()));
+  /** Amendment A20: clamp the bar's visual representation to 0-100 so it
+   * never renders past its track, but keep the true pct unclamped for
+   * status calculation and labeling. */
+  readonly barPct = computed(() => Math.min(100, Math.max(0, this.pct())));
+
+  readonly level = computed<UtilizationLevel>(() => {
+    const p = this.pct();
+    // Out-of-range pct (over 100% or negative) means used exceeded total,
+    // which indicates a data integrity issue with the backend numbers.
+    // Surface it as an error so operators notice rather than silently
+    // clamping and hiding the bug.
+    if (p > 100 || p < 0) return 'crit';
+    return levelFor(p);
+  });
 
   readonly label = computed(() => `${this.used()} / ${this.total()} (${this.pct().toFixed(1)}%)`);
 

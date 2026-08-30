@@ -62,13 +62,32 @@ type DHCPReservation struct {
 	UpdatedByUserID *int64      `json:"updated_by_user_id,omitempty" db:"updated_by_user_id"`
 }
 
-// LeaseBindingState enumerates the lifecycle states of a DHCPLease.
+// LeaseBindingState enumerates the lifecycle states of a DHCPLease. These are
+// DHCP protocol / row-provenance facts, NOT an address status: three of the
+// four mean the same thing to the allocator. Use AddressStatus for anything an
+// operator reads -- amendment A20.
 type LeaseBindingState string
 
 const (
-	LeaseStateActive    LeaseBindingState = "active"
-	LeaseStateExpired   LeaseBindingState = "expired"
-	LeaseStateReleased  LeaseBindingState = "released"
+	// LeaseStateActive: a client holds this address. scanCandidateIPs and
+	// CanAllocateInPool both exclude it, and claimLeaseIP will only reclaim it
+	// for the same client (renew-in-place affinity).
+	LeaseStateActive LeaseBindingState = "active"
+
+	// LeaseStateExpired: the reaper found lease_end in the past. The address is
+	// free -- claimLeaseIP's reclaim clause accepts it.
+	LeaseStateExpired LeaseBindingState = "expired"
+
+	// LeaseStateReleased: the client sent RELEASE or DECLINE, or an operator
+	// released it. Operationally IDENTICAL to expired: claimLeaseIP matches
+	// both with one `binding_state IN ('expired', 'released')` clause. The two
+	// differ only in how the row got here.
+	LeaseStateReleased LeaseBindingState = "released"
+
+	// LeaseStateAbandoned: held back after a conflict. The only state that is
+	// genuinely distinct -- claimLeaseIP's reclaim clause omits it, so the
+	// address stays unclaimable until ExpireLeasesOlderThan sweeps it past
+	// lease_end and rewrites it to expired.
 	LeaseStateAbandoned LeaseBindingState = "abandoned"
 )
 
@@ -107,6 +126,11 @@ type DHCPLease struct {
 	// lookups leave ReservationState empty, and those leases never reach JSON.
 	ReservationState LeaseReservationState `json:"reservation_state" db:"-"`
 	Reservation      *LeaseReservation     `json:"reservation" db:"-"`
+
+	// AddressStatus is amendment A20: the one status an operator reads, derived
+	// from BindingState and Reservation together. Populated by the same read
+	// paths that populate ReservationState.
+	AddressStatus AddressStatus `json:"address_status" db:"-"`
 }
 
 // LeaseReservationState names how a lease relates to the reservations in its
@@ -179,5 +203,68 @@ func ClassifyLeaseReservation(res *LeaseReservation) LeaseReservationState {
 		return LeasePinnedElsewhere
 	default:
 		return LeaseAddressReserved
+	}
+}
+
+// AddressStatus is what an address is actually doing, and the only status
+// vocabulary the UI and CLI are allowed to show. It exists because
+// LeaseBindingState is a protocol fact rather than a status: `released` and
+// `expired` both mean the address is free, and rendering them as distinct
+// coloured chips told operators an address was in some special state when the
+// allocator had already handed it back to the pool.
+//
+// The four values partition an address exactly the way the utilization rollup
+// does (see toUtilization's used / reserved / free), so a prefix's counts and
+// its client table can never contradict each other -- which they did before
+// amendment A20.
+type AddressStatus string
+
+const (
+	// AddressFree: nothing holds this address. No lease, or a lease that is
+	// released or expired -- claimLeaseIP reclaims both without ceremony.
+	AddressFree AddressStatus = "free"
+
+	// AddressAssigned: a client currently holds this address (an active
+	// lease). Excluded from scanCandidateIPs, counted as used.
+	AddressAssigned AddressStatus = "assigned"
+
+	// AddressReserved: an enabled reservation holds this address for a client
+	// that is not currently on it. The address is kept out of the dynamic
+	// range waiting for that client -- this is scanCandidateIPs' reservation
+	// exclusion, and the utilization rollup's reservedUnleased.
+	AddressReserved AddressStatus = "reserved"
+
+	// AddressAbandoned: held back after a conflict. Distinct from free because
+	// claimLeaseIP genuinely refuses to reclaim it until the reaper sweeps it.
+	AddressAbandoned AddressStatus = "abandoned"
+)
+
+// ClassifyAddressStatus derives the operator-facing status of one address from
+// its lease binding state and the reservation concerning it. state is nil when
+// no lease row exists for the address at all.
+//
+// Precedence is deliberate and mirrors the allocator:
+//
+//   - abandoned first: claimLeaseIP will not reclaim it, whatever else is true.
+//   - then an active lease: a client is on the address right now, even if a
+//     reservation also names it. "Assigned" plus a pin is the healthy state for
+//     a reservation actually in use.
+//   - then an enabled reservation: nobody is on the address, but it is held.
+//     A DISABLED reservation deliberately does not count -- scanCandidateIPs
+//     filters on is_enabled, so it holds nothing and the address really is free.
+//   - otherwise free, which folds in released and expired.
+//
+// Postgres and the in-memory mock both call this, so the two can never
+// disagree, exactly as ClassifyLeaseReservation does for pin state.
+func ClassifyAddressStatus(state *LeaseBindingState, res *LeaseReservation) AddressStatus {
+	switch {
+	case state != nil && *state == LeaseStateAbandoned:
+		return AddressAbandoned
+	case state != nil && *state == LeaseStateActive:
+		return AddressAssigned
+	case res != nil && res.IsEnabled:
+		return AddressReserved
+	default:
+		return AddressFree
 	}
 }

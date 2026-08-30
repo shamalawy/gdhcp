@@ -738,7 +738,11 @@ export class IpamTreeComponent {
       case 'allocated':
         return `${pct}% of this block's address space is carved into child prefixes`;
       case 'dhcp':
-        return `${pct}% of this subnet's DHCP addresses are in use`;
+        // Amendment A20: this percentage is denominated in the SUBNET's usable
+        // addresses, not the DHCP pool's range, so that narrowing a pool no
+        // longer changes a subnet's utilization. The wording has to match, or
+        // the bar claims to measure pool usage while measuring subnet usage.
+        return `${pct}% of this subnet's usable addresses are assigned or reserved`;
       default:
         return 'No DHCP scope on this subnet yet';
     }

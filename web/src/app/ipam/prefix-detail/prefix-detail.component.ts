@@ -172,22 +172,50 @@ const SUBNET_SIZE_CHOICES = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
           } @else if (utilization()) {
             @let util = utilization()!;
             @if (prefix.prefix_type === 'subnet') {
-              @if (util.scope_count === 0) {
-                <!-- No scope means no pool, so the DHCP view is all zeroes.
-                     Report the block's own capacity instead of "0 / 0". -->
-                <app-utilization-bar [used]="0" [total]="usableHosts(util)" />
-                <p class="gdhcp-muted small">
-                  No DHCP scope manages this subnet — {{ usableHosts(util) }} usable addresses, none tracked.
+              <!-- A subnet is a broadcast domain — account for the whole space.
+                   amendment A20: pool_total is the number of addresses inside DHCP pools;
+                   reserved_infra is network + broadcast (0 for /31,/32); static_total is
+                   outside every pool. The invariant for subnets:
+                   reserved_infra + static_total + pool_total === space_total. -->
+              <div class="subnet-util-breakdown">
+                <p class="util-headline">
+                  <strong>{{ util.space_total }}</strong> addresses
                 </p>
-              } @else {
-                <app-utilization-bar [used]="util.active" [total]="util.total" [sparkline]="historySparkline()" />
-                <div class="util-counts">
-                  <span><strong>{{ util.active }}</strong> used</span>
-                  <span><strong>{{ util.reserved }}</strong> reserved</span>
-                  <span><strong>{{ util.available }}</strong> free</span>
-                  <span class="gdhcp-muted"><strong>{{ util.total }}</strong> total</span>
+                <div class="breakdown-row">
+                  <span class="breakdown-label">{{ util.reserved_infra }}</span>
+                  <span class="breakdown-desc">network + broadcast</span>
                 </div>
-              }
+                <div class="breakdown-row">
+                  <span class="breakdown-label">{{ util.static_total }}</span>
+                  <span class="breakdown-desc">outside any DHCP pool</span>
+                </div>
+                @if (util.pool_total > 0) {
+                  <div class="breakdown-row">
+                    <span class="breakdown-label">{{ util.pool_total }}</span>
+                    <span class="breakdown-desc">in DHCP pools</span>
+                  </div>
+                  <div class="pool-allocation">
+                    <span><strong>{{ util.active }}</strong> assigned</span>
+                    <span class="sep">·</span>
+                    <span><strong>{{ util.reserved }}</strong> reserved</span>
+                    <span class="sep">·</span>
+                    <span><strong>{{ util.available }}</strong> free</span>
+                  </div>
+                  <!-- Amendment A20: used is pool_total - available, never active + reserved.
+                       util.reserved counts ALL enabled reservations while util.available already
+                       excludes only the unleased ones, so summing them counts a reservation that
+                       is currently leased twice. -->
+                  <app-utilization-bar
+                    [used]="util.pool_total - util.available"
+                    [total]="util.space_total - util.reserved_infra"
+                    [sparkline]="historySparkline()"
+                  />
+                } @else {
+                  <p class="gdhcp-muted small" style="margin-top: 8px;">
+                    No DHCP pool covers this subnet — no addresses are tracked.
+                  </p>
+                }
+              </div>
             } @else {
               <div class="util-block">
                 <p class="util-block-label">
@@ -378,6 +406,47 @@ const SUBNET_SIZE_CHOICES = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
 
       .util-block-label .gdhcp-muted {
         font-weight: 400;
+      }
+
+      .subnet-util-breakdown {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .util-headline {
+        margin: 0;
+        font-size: 13px;
+      }
+
+      .breakdown-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+      }
+
+      .breakdown-label {
+        min-width: 40px;
+        text-align: right;
+        font-weight: 600;
+      }
+
+      .breakdown-desc {
+        color: var(--text-secondary);
+        font-size: 12px;
+      }
+
+      .pool-allocation {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 13px;
+        margin: 8px 0;
+      }
+
+      .pool-allocation .sep {
+        color: var(--divider-color);
       }
 
       .small {
@@ -663,10 +732,12 @@ export class PrefixDetailComponent {
     return addressCountForPrefixLen(size);
   }
 
-  /** Usable host addresses in this block: its size less network and
-   * broadcast, which /31 and /32 don't have (RFC 3021). */
+  /** Usable host addresses in this block: space_total minus reserved_infra
+   * (network + broadcast, which is 0 for /31 and /32 per RFC 3021).
+   * Kept for backward compatibility; the Utilization panel now displays
+   * reserved_infra explicitly in the breakdown. */
   usableHosts(util: PrefixUtilization): number {
-    return util.space_total > 2 ? util.space_total - 2 : util.space_total;
+    return util.space_total - util.reserved_infra;
   }
 
   saveDescription(prefix: IPAMPrefix, description: string | null): void {

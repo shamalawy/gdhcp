@@ -22,8 +22,10 @@ import { TagEditorComponent } from '../shared/tag-editor.component';
       <section class="gdhcp-card">
         <h3>Utilization</h3>
         @if (utilization(); as u) {
-          <app-utilization-bar [used]="u.active + u.reserved" [total]="u.total" />
-          <p class="detail gdhcp-muted">{{ u.active }} active · {{ u.reserved }} reserved · {{ u.total - u.active - u.reserved }} available</p>
+          <!-- Amendment A20: use server's authoritative 'available' field (total - active - reservedUnleased).
+               do not recompute as total - active - reserved, which double-counts leased reservations. -->
+          <app-utilization-bar [used]="u.total - u.available" [total]="u.total" />
+          <p class="detail gdhcp-muted">{{ u.active }} active · {{ u.reserved }} reserved · {{ u.available }} available</p>
         } @else {
           <p class="gdhcp-muted">Loading…</p>
         }

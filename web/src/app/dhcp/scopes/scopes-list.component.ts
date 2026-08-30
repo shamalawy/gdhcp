@@ -231,9 +231,11 @@ export class ScopesListComponent {
               : utilization && utilization.pct >= 80
                 ? 'warn'
                 : 'ok';
+          // Amendment A20: use server's authoritative `available` field; do not recompute as
+          // total - active - reserved, which double-counts leased reservations.
           return {
             scope,
-            utilization: utilization ? { used: utilization.active + utilization.reserved, total: utilization.total } : null,
+            utilization: utilization ? { used: utilization.total - utilization.available, total: utilization.total } : null,
             status,
           };
         }),

@@ -326,7 +326,9 @@ export class DashboardComponent implements OnInit, OnDestroy {
           return forkJoin(
             res.items.map((scope) =>
               this.api.scopeUtilization(scope.id).pipe(
-                map((u): TopScopeEntry => ({ id: scope.id, name: scope.name, network: scope.network, used: u.active + u.reserved, total: u.total })),
+                // Amendment A20: total - available, not active + reserved -- the latter
+                // counts a currently-leased reservation twice.
+                map((u): TopScopeEntry => ({ id: scope.id, name: scope.name, network: scope.network, used: u.total - u.available, total: u.total })),
                 catchError(() => of(null)),
               ),
             ),

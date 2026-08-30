@@ -152,7 +152,7 @@ func newPrefixClientsCmd(flags *persistentFlags) *cobra.Command {
 				return err
 			}
 			return common.Render(cmd.OutOrStdout(), rc.output, page, func() ([]string, [][]string) {
-				headers := []string{"KIND", "IP_ADDRESS", "SCOPE", "POOL", "CLIENT_MAC", "CLIENT_ID", "HOSTNAME", "STATE", "EXPIRES", "IDENTIFIER"}
+				headers := []string{"KIND", "IP_ADDRESS", "SCOPE", "POOL", "CLIENT_MAC", "CLIENT_ID", "HOSTNAME", "STATUS", "EXPIRES", "IDENTIFIER"}
 				rows := make([][]string, 0, len(page.Items))
 				for _, c := range page.Items {
 					mac := "-"
@@ -167,12 +167,11 @@ func newPrefixClientsCmd(flags *persistentFlags) *cobra.Command {
 					if c.ClientHostname != nil {
 						hostname = *c.ClientHostname
 					}
-					// A lease carries a binding state; a reservation instead
-					// carries the identifier it is bound to.
-					bindingState := "-"
-					if c.BindingState != nil {
-						bindingState = string(*c.BindingState)
-					}
+					// A lease carries an AddressStatus derived from its binding state
+					// and reservations; a reservation carries one too (amendment A20).
+					// This is the same status vocabulary the API and web UI render, so
+					// all surfaces are consistent.
+					status := string(c.AddressStatus)
 					expires := "-"
 					if c.LeaseEnd != nil {
 						expires = common.Time(*c.LeaseEnd)
@@ -192,7 +191,7 @@ func newPrefixClientsCmd(flags *persistentFlags) *cobra.Command {
 						mac,
 						clientID,
 						hostname,
-						bindingState,
+						status,
 						expires,
 						identifier,
 					})
