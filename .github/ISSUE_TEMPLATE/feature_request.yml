@@ -1,0 +1,77 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature. Please describe what you'd like to see and why it would be useful.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What feature would you like to see?
+      placeholder: Brief description of the requested feature
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this feature important? What problem does it solve?
+      placeholder: |
+        I need this because...
+        Current workaround: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution (optional)
+      description: Do you have an idea for how to implement this?
+      placeholder: |
+        For example:
+        - Add a new REST API endpoint...
+        - Add a CLI command...
+        - Modify the database schema...
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: Are there other ways to achieve this?
+      placeholder: |
+        Alternative approach:
+        - ...
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: What part of gdhcp does this affect?
+      options:
+        - DHCP engine
+        - IPAM
+        - REST API
+        - Web UI
+        - CLI
+        - HA clustering
+        - Deployment / configuration
+        - Other
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched existing issues and discussions
+          required: false
+        - label: This feature does not duplicate an existing issue
+          required: false

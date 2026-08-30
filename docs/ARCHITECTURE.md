@@ -1340,7 +1340,7 @@ Triggers execute within transaction context, providing reliable validation on co
 3. **CI/CD safety** (GitHub Actions workflow):
    ```yaml
    - name: Build
-     working-directory: /home/shereif/code/gdhcp
+     working-directory: <repo>
      run: make all  # Always from repo root
    ```
 

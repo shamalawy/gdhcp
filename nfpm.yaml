@@ -1,0 +1,95 @@
+# nfpm configuration for gdhcp Debian and RPM packages.
+#
+# This config supports both deb and rpm package generation.
+# Version and architecture are supplied at build time via environment variables.
+#
+# Build locally (requires nfpm):
+#   # Build dist/gdhcp for the target arch first, then:
+#   export PKG_VERSION=0.1.0 ARCH=amd64
+#   nfpm package -f nfpm.yaml -p deb -t dist/packages/
+#   nfpm package -f nfpm.yaml -p rpm -t dist/packages/
+#
+# nfpm expands ${VAR} from the environment (Go-template {{ .Env.X }} syntax is
+# NOT expanded — it lands in the package verbatim as a literal version).
+# PKG_VERSION carries NO leading "v" — a Debian version must start with a
+# digit, so "v0.1.0" produces a package dpkg refuses. The release workflow
+# derives it as ${TAG#v}.
+#
+# Architecture mapping (automatic by nfpm):
+#   amd64 → deb: amd64, rpm: x86_64
+#   arm64 → deb: arm64, rpm: aarch64
+#
+# The resulting packages install gdhcp with systemd integration, config file
+# management, and HA support via setcap fallback for ancient systemd (v<229).
+
+name: gdhcp
+version: "${PKG_VERSION}"
+arch: "${ARCH}"
+maintainer: shamalawy <shamalawy@users.noreply.github.com>
+description: |
+  High-availability DHCPv4 server with built-in IPAM.
+  Single static binary serving DHCP, a REST API and an embedded web UI,
+  backed by PostgreSQL. Supports multi-node clusters with VIP failover.
+homepage: https://github.com/shamalawy/gdhcp
+license: MIT
+
+contents:
+  # gdhcp binary
+  - src: dist/gdhcp
+    dst: /usr/local/bin/gdhcp
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Config template (marked as config file; package manager prompts on changes)
+  - src: config.yaml.example
+    dst: /etc/gdhcp/config.yaml
+    type: config
+    file_info:
+      mode: 0600
+      owner: gdhcp
+      group: gdhcp
+
+  # Environment overrides for systemd (not config; operator edits config.yaml)
+  - src: deploy/systemd/gdhcp.env
+    dst: /etc/gdhcp/gdhcp.env
+    file_info:
+      mode: 0600
+      owner: gdhcp
+      group: gdhcp
+
+  # Systemd unit file
+  - src: deploy/systemd/gdhcp.service
+    dst: /etc/systemd/system/gdhcp.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/postrm.sh
+
+# The server talks to PostgreSQL over the wire via pgx (pure Go, amendment
+# A3), so no client library is required at runtime. psql is only needed by
+# scripts/bootstrap-db.sh, hence a recommendation rather than a dependency —
+# and the package name differs between the two ecosystems, so it cannot live
+# in a shared `depends` block.
+depends:
+  - systemd
+
+# /etc/gdhcp/config.yaml is marked `type: config` in contents above, which is
+# what makes dpkg treat it as a conffile and rpm as %config — there is no
+# separate conffiles list in nfpm v2.
+overrides:
+  deb:
+    recommends:
+      - postgresql-client
+  rpm:
+    recommends:
+      - postgresql
+
+rpm:
+  summary: High-availability DHCPv4 server with built-in IPAM

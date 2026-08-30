@@ -72,7 +72,7 @@ repo/
 
 ### Makefile
 
-**Path**: `/home/shereif/code/gdhcp/Makefile`
+**Path**: `<repo>/Makefile`
 
 Target environment: Linux/macOS. Go 1.26+, Node 20+, PostgreSQL (for local dev only).
 
@@ -170,7 +170,7 @@ fmt:
 
 ### Go Embedding (Migrations & Web Assets)
 
-**File**: `/home/shereif/code/gdhcp/server/cmd/gdhcp/main.go`
+**File**: `<repo>/server/cmd/gdhcp/main.go`
 
 ```go
 package main
@@ -292,7 +292,7 @@ features:
 
 ### install.sh
 
-**Path**: `/home/shereif/code/gdhcp/scripts/install.sh`
+**Path**: `<repo>/scripts/install.sh`
 
 Installs gdhcp as a systemd service. Requires root.
 
@@ -407,7 +407,7 @@ echo "5. View logs with: journalctl -u gdhcp -f"
 
 ### uninstall.sh
 
-**Path**: `/home/shereif/code/gdhcp/scripts/uninstall.sh`
+**Path**: `<repo>/scripts/uninstall.sh`
 
 Removes gdhcp service and files.
 
@@ -443,7 +443,7 @@ echo "  sudo rm -rf ${CONFIG_DIR} /var/lib/gdhcp /var/log/gdhcp"
 
 ### systemd Service Unit
 
-**Path**: `/home/shereif/code/gdhcp/deploy/systemd/gdhcp.service`
+**Path**: `<repo>/deploy/systemd/gdhcp.service`
 
 (Already included in install.sh above, but also provided standalone for manual installation)
 
@@ -460,7 +460,7 @@ Key points:
 
 ### Dockerfile
 
-**Path**: `/home/shereif/code/gdhcp/deploy/docker/Dockerfile`
+**Path**: `<repo>/deploy/docker/Dockerfile`
 
 Multi-stage build: Node for frontend, Go for backend, distroless/alpine for final image.
 
@@ -535,7 +535,7 @@ EXPOSE 8080 67/udp
 
 ### docker-compose.yml
 
-**Path**: `/home/shereif/code/gdhcp/deploy/docker/docker-compose.yml`
+**Path**: `<repo>/deploy/docker/docker-compose.yml`
 
 Services: `gdhcp_postgres` (database), `gdhcp_server` (DHCP+API).
 
@@ -692,7 +692,7 @@ deploy/k8s/
 
 ### Base Kustomization
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/kustomization.yaml`
+**Path**: `<repo>/deploy/k8s/base/kustomization.yaml`
 
 ```yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -728,7 +728,7 @@ replicas:
 
 ### Namespace
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/namespace.yaml`
+**Path**: `<repo>/deploy/k8s/base/namespace.yaml`
 
 ```yaml
 apiVersion: v1
@@ -741,7 +741,7 @@ metadata:
 
 ### PostgreSQL StatefulSet (Optional)
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/postgres/statefulset.yaml`
+**Path**: `<repo>/deploy/k8s/base/postgres/statefulset.yaml`
 
 If running PostgreSQL in-cluster. For production, consider external managed PostgreSQL (RDS, Cloud SQL, Azure Database).
 
@@ -824,7 +824,7 @@ spec:
           storage: 10Gi
 ```
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/postgres/service.yaml`
+**Path**: `<repo>/deploy/k8s/base/postgres/service.yaml`
 
 ```yaml
 apiVersion: v1
@@ -846,7 +846,7 @@ spec:
 
 ### gdhcp Deployment (Primary)
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/deployment.yaml`
+**Path**: `<repo>/deploy/k8s/base/gdhcp/deployment.yaml`
 
 Deployment is preferred for stateless DHCP+API servers (horizontal scaling, rolling updates). For HA, use a secondary Deployment with VIP failover managed externally (e.g., keepalived, AWS Route 53 health checks).
 
@@ -968,7 +968,7 @@ spec:
 
 ### gdhcp DaemonSet (Alternative)
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/daemonset.yaml`
+**Path**: `<repo>/deploy/k8s/base/gdhcp/daemonset.yaml`
 
 Alternative to Deployment. Use DaemonSet if gdhcp must run on every node (not typical; only if every node is a DHCP server).
 
@@ -1061,7 +1061,7 @@ spec:
 
 ### Service
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/service.yaml`
+**Path**: `<repo>/deploy/k8s/base/gdhcp/service.yaml`
 
 ClusterIP service for API and web UI. DHCP traffic uses UDP directly on port 67 (hostPort binding).
 
@@ -1085,7 +1085,7 @@ spec:
 
 ### ConfigMap
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/configmap.yaml`
+**Path**: `<repo>/deploy/k8s/base/gdhcp/configmap.yaml`
 
 Default configuration (can be overridden per overlay).
 
@@ -1117,7 +1117,7 @@ data:
 
 ### Secret
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/secret.yaml`
+**Path**: `<repo>/deploy/k8s/base/gdhcp/secret.yaml`
 
 Database credentials and TLS (if using HTTPS).
 
@@ -1138,7 +1138,7 @@ stringData:
 
 ### RBAC
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/rbac.yaml`
+**Path**: `<repo>/deploy/k8s/base/gdhcp/rbac.yaml`
 
 ServiceAccount, ClusterRole (if needed), and RoleBinding.
 
@@ -1179,7 +1179,7 @@ subjects:
 
 ### Production Overlay
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/overlays/production/kustomization.yaml`
+**Path**: `<repo>/deploy/k8s/overlays/production/kustomization.yaml`
 
 Override replicas, resource limits, image tags, and database settings for production.
 
@@ -1221,7 +1221,7 @@ configMapGenerator:
     behavior: replace
 ```
 
-**Path**: `/home/shereif/code/gdhcp/deploy/k8s/overlays/production/deployment-patch.yaml`
+**Path**: `<repo>/deploy/k8s/overlays/production/deployment-patch.yaml`
 
 ```yaml
 apiVersion: apps/v1
@@ -1411,36 +1411,36 @@ $ curl http://localhost:8080/api/version
 ## Summary of File Paths
 
 ### Build & Source
-- `/home/shereif/code/gdhcp/Makefile` — Build orchestration
-- `/home/shereif/code/gdhcp/server/cmd/gdhcp/main.go` — Server binary entry point
-- `/home/shereif/code/gdhcp/server/cmd/gdhcp-cli/main.go` — CLI binary entry point
-- `/home/shereif/code/gdhcp/server/migrations/*.sql` — Database migrations
-- `/home/shereif/code/gdhcp/web/` — Angular frontend (built to `web/dist/`)
+- `<repo>/Makefile` — Build orchestration
+- `<repo>/server/cmd/gdhcp/main.go` — Server binary entry point
+- `<repo>/server/cmd/gdhcp-cli/main.go` — CLI binary entry point
+- `<repo>/server/migrations/*.sql` — Database migrations
+- `<repo>/web/` — Angular frontend (built to `web/dist/`)
 
 ### Bare Metal Deployment
-- `/home/shereif/code/gdhcp/scripts/install.sh` — Installer
-- `/home/shereif/code/gdhcp/scripts/uninstall.sh` — Uninstaller
-- `/home/shereif/code/gdhcp/deploy/systemd/gdhcp.service` — systemd unit file
+- `<repo>/scripts/install.sh` — Installer
+- `<repo>/scripts/uninstall.sh` — Uninstaller
+- `<repo>/deploy/systemd/gdhcp.service` — systemd unit file
 - `/etc/gdhcp/config.yaml` — Runtime config (on deployed system)
 
 ### Docker
-- `/home/shereif/code/gdhcp/deploy/docker/Dockerfile` — Multi-stage build
-- `/home/shereif/code/gdhcp/deploy/docker/docker-compose.yml` — Compose manifest
+- `<repo>/deploy/docker/Dockerfile` — Multi-stage build
+- `<repo>/deploy/docker/docker-compose.yml` — Compose manifest
 
 ### Kubernetes
-- `/home/shereif/code/gdhcp/deploy/k8s/base/kustomization.yaml` — Base kustomization
-- `/home/shereif/code/gdhcp/deploy/k8s/base/namespace.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/postgres/statefulset.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/postgres/service.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/deployment.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/daemonset.yaml` (alternative)
-- `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/service.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/configmap.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/secret.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/base/gdhcp/rbac.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/overlays/production/kustomization.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/overlays/staging/kustomization.yaml`
-- `/home/shereif/code/gdhcp/deploy/k8s/overlays/dev/kustomization.yaml`
+- `<repo>/deploy/k8s/base/kustomization.yaml` — Base kustomization
+- `<repo>/deploy/k8s/base/namespace.yaml`
+- `<repo>/deploy/k8s/base/postgres/statefulset.yaml`
+- `<repo>/deploy/k8s/base/postgres/service.yaml`
+- `<repo>/deploy/k8s/base/gdhcp/deployment.yaml`
+- `<repo>/deploy/k8s/base/gdhcp/daemonset.yaml` (alternative)
+- `<repo>/deploy/k8s/base/gdhcp/service.yaml`
+- `<repo>/deploy/k8s/base/gdhcp/configmap.yaml`
+- `<repo>/deploy/k8s/base/gdhcp/secret.yaml`
+- `<repo>/deploy/k8s/base/gdhcp/rbac.yaml`
+- `<repo>/deploy/k8s/overlays/production/kustomization.yaml`
+- `<repo>/deploy/k8s/overlays/staging/kustomization.yaml`
+- `<repo>/deploy/k8s/overlays/dev/kustomization.yaml`
 
 ### Configuration
 - `/etc/gdhcp/config.yaml` — Single server configuration (production)

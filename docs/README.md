@@ -4,6 +4,12 @@ Start with the top-level [../README.md](../README.md) for a quickstart.
 **`AMENDMENTS.md` is binding** — where it disagrees with any other doc here
 (including `ARCHITECTURE.md` and `CONTRACTS.md`), `AMENDMENTS.md` wins.
 
+## Operator Manual
+
+| Doc | What's in it |
+|---|---|
+| [MANUAL.md](MANUAL.md) | Day-to-day operation: installation, configuration, IPAM/DHCP management, HA setup, CLI reference, RBAC, monitoring, backup, upgrade — start here to run gdhcp in production |
+
 ## Core references
 
 | Doc | What's in it |

@@ -9,7 +9,7 @@
 ## Root-Level Files
 
 ```
-/home/shereif/code/gdhcp/
+<repo>/
 ├── go.mod                          # Go module definition
 ├── go.sum                           # Go dependencies lock file
 ├── Makefile                         # Build targets: all, web, build, test, clean, lint

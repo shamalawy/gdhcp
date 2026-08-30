@@ -1,0 +1,59 @@
+version: 2
+updates:
+  # Go dependencies
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+    labels:
+      - "dependencies"
+      - "go"
+    reviewers:
+      - "shamalawy"
+    allow:
+      - dependency-type: "production"
+      - dependency-type: "development"
+
+  # npm dependencies (web frontend)
+  - package-ecosystem: "npm"
+    directory: "web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:15"
+    labels:
+      - "dependencies"
+      - "frontend"
+    reviewers:
+      - "shamalawy"
+    allow:
+      - dependency-type: "production"
+      - dependency-type: "development"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:30"
+    labels:
+      - "dependencies"
+      - "ci"
+    reviewers:
+      - "shamalawy"
+
+  # Container images
+  - package-ecosystem: "docker"
+    directory: "deploy/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:45"
+    labels:
+      - "dependencies"
+      - "docker"
+    reviewers:
+      - "shamalawy"
