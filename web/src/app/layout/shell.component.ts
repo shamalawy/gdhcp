@@ -21,11 +21,21 @@ interface NavLink {
   label: string;
   path: string;
   icon: string;
+  /** Rendered indented under the parent, always visible. VLANs is the one
+   * IPAM page the prefix tree cannot reach — it is the layer-2 axis, not a
+   * node in the layer-3 hierarchy — so it needs a nav entry of its own
+   * rather than a button tucked into the IPAM overview's header. */
+  children?: NavLink[];
 }
 
 const NAV_LINKS: NavLink[] = [
   { label: 'Dashboard', path: '/dashboard', icon: 'dashboard' },
-  { label: 'IPAM', path: '/ipam', icon: 'lan' },
+  {
+    label: 'IPAM',
+    path: '/ipam',
+    icon: 'lan',
+    children: [{ label: 'VLANs', path: '/ipam/vlans', icon: 'settings_ethernet' }],
+  },
   { label: 'DHCP', path: '/dhcp', icon: 'dns' },
   { label: 'Clusters', path: '/ha', icon: 'hub' },
   { label: 'Admin', path: '/admin', icon: 'admin_panel_settings' },
@@ -121,6 +131,19 @@ function loadThemePreference(): ThemePreference {
               <mat-icon matListItemIcon>{{ link.icon }}</mat-icon>
               <span matListItemTitle>{{ link.label }}</span>
             </a>
+            @if (link.children) {
+              @for (child of link.children; track child.path) {
+                <a
+                  mat-list-item
+                  class="sub-link"
+                  [routerLink]="child.path"
+                  routerLinkActive="active-link"
+                >
+                  <mat-icon matListItemIcon>{{ child.icon }}</mat-icon>
+                  <span matListItemTitle>{{ child.label }}</span>
+                </a>
+              }
+            }
           }
         </mat-nav-list>
       </mat-sidenav>
@@ -241,6 +264,25 @@ function loadThemePreference(): ThemePreference {
 
       .active-link {
         background: var(--active-bg);
+      }
+
+      /* Sub-nav rows read as belonging to the section above them: indented,
+         a size down, and quieter until they are the active page. */
+      .sub-link {
+        --mdc-list-list-item-one-line-container-height: 40px;
+        --mdc-list-list-item-label-text-size: 13px;
+        padding-left: 16px;
+        color: var(--text-secondary);
+      }
+
+      .sub-link mat-icon {
+        font-size: 18px;
+        width: 18px;
+        height: 18px;
+      }
+
+      .sub-link.active-link {
+        color: var(--text-primary);
       }
 
       .toolbar {

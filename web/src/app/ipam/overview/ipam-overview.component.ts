@@ -58,10 +58,6 @@ const PAGE_SIZE_OPTIONS = [12, 24, 48];
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <app-page-header title="IPAM — VRFs">
-      <a mat-stroked-button routerLink="/ipam/vlans">
-        <mat-icon>lan</mat-icon>
-        VLANs
-      </a>
       <button mat-flat-button color="primary" (click)="openCreate()">
         <mat-icon>add</mat-icon>
         New VRF

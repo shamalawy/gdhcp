@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The VLAN detail page (`/ipam/vlans/{id}`) rendered an empty box. Its data-loading `effect()` was missing `allowSignalWrites`, so Angular threw `NG0600` before the first request was ever made and the page stayed on a loading skeleton that had no styles of its own (amendment A21)
+
+### Added
+
+- VLANs are now taggable in the UI: editable tag chips and an inline-editable description on the VLAN detail page, and a Tags column on the VLAN list. The server already accepted `entity_type=vlan`; nothing had ever used it (amendment A21)
+- The VLAN detail page shows a roll-up of the prefixes on the segment — prefix and subnet counts, total address space, the VRFs involved, and mean DHCP utilization — above the prefix table, which now carries each prefix's tags (amendment A21)
+- The shared prefix table gained an opt-in VRF column, used by the VLAN page because one layer-2 segment can be numbered in more than one VRF (amendment A21)
+
+### Changed
+
+- VLANs moved from a button in the IPAM overview's page header to a sub-entry under IPAM in the left sidenav. The prefix tree cannot represent a VLAN, so the section's own navigation had nowhere to put it (amendment A21)
+- The VLAN list paginates (25/50/100) instead of loading 200 rows at once; its new Tags column costs one request per row and there is no bulk tag endpoint (amendment A21)
+
 ## [0.2.0] - 2026-08-30
 
 ### Fixed

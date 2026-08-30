@@ -648,3 +648,67 @@ separate and unchanged.
 A2's CLI: the `lease` and `prefix clients` commands' binding-state columns are replaced with
 AddressStatus columns, using the same `ClassifyAddressStatus` logic as the API so all surfaces agree.
 
+
+## A21. The VLAN detail page, VLAN tagging, and where VLANs live in the nav
+Added after A20. A16.1 built the VLAN subsystem and A16.2 declared VLANs taggable, but the
+frontend never finished either: the detail page could not render at all, and nothing in the UI
+ever attached a tag to a VLAN.
+
+### A21.1 `effect()` that loads data must set `allowSignalWrites`
+`/ipam/vlans/{id}` rendered an empty box. `VlanDetailComponent` kicked its loads off from
+
+```ts
+effect(() => this.load(this.id()));
+```
+
+and `load()`'s first statement is `this.loading.set(true)`. On Angular 18 a synchronous signal
+write inside an effect throws `NG0600` unless the effect opts in, so the effect died before it
+issued a single request: `loading` stayed `true` forever and no data was ever fetched. The
+server was never at fault — `GET /vlans/{id}` and `GET /vlans/{id}/prefixes` both answered
+correctly throughout.
+
+**Binding: every `effect()` that drives a load from a route-bound `input()` must pass
+`{ allowSignalWrites: true }`,** as `PrefixDetailComponent` and the DHCP detail pages already
+do. `ngOnInit` is not an alternative here: with `withComponentInputBinding()` the router reuses
+the component instance when navigating between two VLANs and only updates the `id` input, so an
+`ngOnInit`-only load leaves the page frozen on the previous entity.
+
+### A21.2 `.skeleton-line` is component-local, not global
+The failure above was invisible rather than loud because the loading skeleton it was stuck on
+had no styles. `.gdhcp-card`, `.gdhcp-muted`, `.gdhcp-mono` and `.gdhcp-table` are global (see
+`web/src/styles.scss`); `.skeleton-line` and its `shimmer` keyframes are **not** — each page
+carries its own copy. A page that writes `<div class="skeleton-line">` without defining the
+class renders a zero-height nothing, which is indistinguishable from a broken page. Either
+define it in the component's `styles` or do not use it.
+
+### A21.3 VLAN tagging is wired up
+A16.2 added `vlan` to `TaggableEntityType` and the server's `validEntityType`, but no screen
+used it. VLANs now carry tags the same way VRFs and prefixes do, through `EntityTagsService`
+with the entity type in `VLAN_ENTITY_TYPE` (`ipam/data-access/entity-tags.service.ts`),
+alongside `PREFIX_ENTITY_TYPE`:
+
+- the detail page renders editable chips and an inline-editable description;
+- the `/ipam/vlans` list renders a read-only Tags column.
+
+Tags cost one request per row — there is no bulk "tags for many entities" endpoint — so the
+VLANs list now **paginates** (25/50/100) instead of pulling `limit=200` in one go. Any list
+that grows a tags column must bound its page size for the same reason.
+
+### A21.4 Navigation: VLANs belongs in the sidenav
+VLANs was reachable only from a `mat-stroked-button` in the IPAM overview's page header, which
+put the layer-2 axis of the section behind the layer-3 one. A16.4 moved the prefix tree into
+`/ipam`'s split layout, and that tree cannot represent a VLAN — a VLAN is not a node in the
+prefix hierarchy — so the section's own navigation has nowhere to put it.
+
+`NavLink` in `layout/shell.component.ts` gains an optional `children`, rendered indented beneath
+its parent and always visible. IPAM's single child is **VLANs** (`/ipam/vlans`). The header
+button is gone; the explainer paragraph's inline link stays, since it is prose, not navigation.
+
+### A21.5 The shared prefix table's VRF column is opt-in
+`ipam/components/prefix-table.component.ts` is shared by the VRF detail page, the prefix detail
+page and now the VLAN detail page. The first two show prefixes that are all in one VRF, where a
+VRF column is noise; a VLAN's prefixes are not, because the same layer-2 segment can be numbered
+in more than one routing instance. The column is therefore driven by an optional
+`vrfNamesById` input — supply the map to get the column, omit it to leave the table as it was.
+`GET /vlans/{id}/prefixes` returns `vrf_id` but no VRF name, so the caller resolves names with
+one `GET /vrfs` call.

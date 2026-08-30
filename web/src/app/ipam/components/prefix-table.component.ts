@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTableModule } from '@angular/material/table';
@@ -11,9 +11,16 @@ import { PREFIX_TYPE_META } from '../util/prefix-type.util';
 
 /**
  * Read-only, click-through table of IPAM prefixes — the shared shape behind
- * both the VRF detail page's "top-level prefixes" table and the prefix
- * detail page's "children" table (same columns per the task spec: prefix,
- * name, type, utilization, tags, description).
+ * the VRF detail page's "top-level prefixes" table, the prefix detail
+ * page's "children" table (same columns per the task spec: prefix, name,
+ * type, utilization, tags, description) and the VLAN detail page's
+ * "prefixes on this VLAN".
+ *
+ * The VLAN page adds a VRF column: unlike the other two callers, its rows
+ * are not all from one VRF — a layer-2 segment can be numbered in more than
+ * one routing instance — so "which VRF is this?" is a real question there
+ * and noise everywhere else. Hence the optional `vrfNamesById` input rather
+ * than a seventh column for everyone.
  */
 @Component({
   selector: 'app-prefix-table',
@@ -33,6 +40,13 @@ import { PREFIX_TYPE_META } from '../util/prefix-type.util';
         <ng-container matColumnDef="name">
           <th mat-header-cell *matHeaderCellDef>Name</th>
           <td mat-cell *matCellDef="let row">{{ row.name || '—' }}</td>
+        </ng-container>
+
+        <ng-container matColumnDef="vrf">
+          <th mat-header-cell *matHeaderCellDef>VRF</th>
+          <td mat-cell *matCellDef="let row">
+            <a [routerLink]="['/ipam', 'vrfs', row.vrf_id]" class="vrf-link">{{ vrfNameFor(row.vrf_id) }}</a>
+          </td>
         </ng-container>
 
         <ng-container matColumnDef="type">
@@ -81,10 +95,10 @@ import { PREFIX_TYPE_META } from '../util/prefix-type.util';
           </td>
         </ng-container>
 
-        <tr mat-header-row *matHeaderRowDef="columns"></tr>
+        <tr mat-header-row *matHeaderRowDef="columns()"></tr>
         <tr
           mat-row
-          *matRowDef="let row; columns: columns"
+          *matRowDef="let row; columns: columns()"
           class="clickable-row"
           [routerLink]="['/ipam', 'prefixes', row.id]"
         ></tr>
@@ -108,6 +122,15 @@ import { PREFIX_TYPE_META } from '../util/prefix-type.util';
       }
 
       .prefix-link:hover {
+        text-decoration: underline;
+      }
+
+      .vrf-link {
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      .vrf-link:hover {
         text-decoration: underline;
       }
 
@@ -161,8 +184,14 @@ export class PrefixTableComponent {
   /** Tags keyed by prefix id, loaded by the parent page (no bulk
    * "tags for many entities" endpoint exists — see EntityTagsService). */
   readonly tagsByPrefixId = input<Record<string, Tag[]>>({});
+  /** Supply to add a VRF column; omit (the default) to leave it out. */
+  readonly vrfNamesById = input<Record<string, string> | null>(null);
 
-  readonly columns = ['prefix', 'name', 'type', 'utilization', 'tags', 'description'];
+  readonly columns = computed(() =>
+    this.vrfNamesById()
+      ? ['prefix', 'name', 'vrf', 'type', 'utilization', 'tags', 'description']
+      : ['prefix', 'name', 'type', 'utilization', 'tags', 'description'],
+  );
 
   typeMeta(row: IPAMPrefix) {
     return PREFIX_TYPE_META[row.prefix_type];
@@ -170,5 +199,9 @@ export class PrefixTableComponent {
 
   tagsFor(prefixId: string): Tag[] {
     return this.tagsByPrefixId()[prefixId] ?? [];
+  }
+
+  vrfNameFor(vrfId: string): string {
+    return this.vrfNamesById()?.[vrfId] ?? vrfId;
   }
 }

@@ -13,6 +13,11 @@ import { MessageResponse, Tag, TaggableEntityType } from '../../shared/models';
  */
 export const PREFIX_ENTITY_TYPE: TaggableEntityType = 'prefix';
 
+/** VLANs are taggable too — `models.TaggableVLAN` is in the server's
+ * validEntityType list (api/tags/handler.go). Same reasoning as above: the
+ * literal lives in one place. */
+export const VLAN_ENTITY_TYPE: TaggableEntityType = 'vlan';
+
 /**
  * Thin wrapper around the tag-related `ApiService` methods, shared by every
  * IPAM page that shows/edits tags (VRF cards, VRF detail, prefix detail,
