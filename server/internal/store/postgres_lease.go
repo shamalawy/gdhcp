@@ -1,6 +1,7 @@
 // postgres_lease.go implements LeaseStore, LeaseQueryStore,
-// ReservationStore, and AllocationHelperStore.NextAvailableIP: DHCP lease
-// allocation per amendment A6, lease lifecycle/query, and reservations.
+// LeaseAdminStore, ReservationStore, and AllocationHelperStore.NextAvailableIP:
+// DHCP lease allocation per amendment A6, lease lifecycle/query, and
+// reservations.
 package store
 
 import (
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -679,29 +681,40 @@ func (p *Postgres) ReservationForLease(ctx context.Context, poolID string, bindi
 // LeaseQueryStore
 // ---------------------------------------------------------------------------
 
-// ListLeases supports filters "scope_id", "pool_id", "state".
+// ListLeases supports filters "scope_id", "pool_id", "state" plus
+// params.Search, matched case-insensitively against the lease's IP text,
+// MAC text and client hostname so the UI's one search box covers all three
+// without the caller having to guess which field a term belongs to.
 func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResult[*models.DHCPLease], error) {
 	limit, offset := normalizeListParams(params)
 	scopeID := nilIfEmpty(params.Filters["scope_id"])
 	poolID := nilIfEmpty(params.Filters["pool_id"])
 	state := nilIfEmpty(params.Filters["state"])
+	search := nilIfEmpty(strings.TrimSpace(params.Search))
 
 	const where = `
 		WHERE ($1::uuid IS NULL OR l.pool_id IN (SELECT id FROM dhcp_pools WHERE scope_id = $1))
 			AND ($2::uuid IS NULL OR l.pool_id = $2)
-			AND ($3::text IS NULL OR l.binding_state = $3)`
+			AND ($3::text IS NULL OR l.binding_state = $3)
+			AND ($4::text IS NULL OR (
+				host(l.ip_address) ILIKE '%' || $4 || '%'
+				OR COALESCE(l.client_mac::text, '') ILIKE '%' || $4 || '%'
+				OR COALESCE(l.client_hostname, '') ILIKE '%' || $4 || '%'
+			))`
 
 	var total int64
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dhcp_leases l`+where, scopeID, poolID, state).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dhcp_leases l`+where, scopeID, poolID, state, search).Scan(&total); err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: count leases: %w", err)
 	}
 
 	order := orderByClause(params.Sort, map[string]string{
 		"ip_address": "l.ip_address", "created_at": "l.created_at", "lease_end": "l.lease_end",
+		"client_mac": "l.client_mac", "client_hostname": "l.client_hostname", "binding_state": "l.binding_state",
+		"updated_at": "l.updated_at",
 	}, "l.ip_address ASC")
 
 	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+` FROM dhcp_leases l`+where+
-		` ORDER BY `+order+` LIMIT $4 OFFSET $5`, scopeID, poolID, state, limit, offset)
+		` ORDER BY `+order+` LIMIT $5 OFFSET $6`, scopeID, poolID, state, search, limit, offset)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases: %w", err)
 	}
@@ -712,6 +725,68 @@ func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResul
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases: %w", err)
 	}
 	return ListResult[*models.DHCPLease]{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+// DeleteLease removes a lease row (LeaseAdminStore). The DELETE returns the
+// row's pool and state so an active lease's removal can be reflected in the
+// pool's cached active-lease count — otherwise the dashboard would keep
+// counting an address that no longer has a lease at all.
+func (p *Postgres) DeleteLease(ctx context.Context, id string) error {
+	var poolID, state string
+	err := p.pool.QueryRow(ctx,
+		`DELETE FROM dhcp_leases WHERE id = $1 RETURNING pool_id, binding_state`, id).Scan(&poolID, &state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("store: delete lease %s: %w", id, models.ErrLeaseNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("store: delete lease %s: %w", id, err)
+	}
+	if state == string(models.LeaseStateActive) {
+		if err := p.adjustActiveLeaseCount(ctx, poolID, -1); err != nil {
+			logStatsWarn("adjust active lease count (delete)", err)
+		}
+	}
+	return nil
+}
+
+// ForceRenewLease implements LeaseAdminStore: an operator-driven renewal
+// that skips RenewLease's MAC match and active-state precondition, and
+// reactivates a lease that had lapsed. The prior state comes back with the
+// row so the pool's active count is only incremented when the lease was not
+// already active.
+func (p *Postgres) ForceRenewLease(ctx context.Context, id string, expiry time.Time) (*models.DHCPLease, error) {
+	now := time.Now().UTC()
+	if !expiry.After(now) {
+		return nil, fmt.Errorf("store: force renew lease %s: new expiry not in the future: %w", id, models.ErrInvalidInput)
+	}
+	duration := expiry.Sub(now)
+	renewal := now.Add(duration / 2)
+	rebind := now.Add(duration * 7 / 8)
+
+	row := p.pool.QueryRow(ctx, `
+		WITH prior AS (
+			SELECT binding_state FROM dhcp_leases WHERE id = $1
+		)
+		UPDATE dhcp_leases SET
+			lease_start = $2, lease_end = $3, renewal_time = $4, rebinding_time = $5,
+			binding_state = 'active', updated_at = now()
+		WHERE id = $1
+		RETURNING `+leaseSelectCols+`, (SELECT binding_state FROM prior)`,
+		id, now, expiry, renewal, rebind,
+	)
+	lease, priorState, err := scanLeaseWithPriorState(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: force renew lease %s: %w", id, models.ErrLeaseNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: force renew lease %s: %w", id, err)
+	}
+	if priorState != string(models.LeaseStateActive) {
+		if err := p.adjustActiveLeaseCount(ctx, lease.PoolID, 1); err != nil {
+			logStatsWarn("adjust active lease count (force renew)", err)
+		}
+	}
+	return lease, nil
 }
 
 func (p *Postgres) GetLease(ctx context.Context, id string) (*models.DHCPLease, error) {

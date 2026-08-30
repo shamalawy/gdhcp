@@ -153,12 +153,21 @@ func New(cfg *config.Config, st store.Store, ha HAStatus, engine EngineInfo, log
 	reg.mutate(http.MethodPut, "/reservations/{reservation_id}", models.RoleOperator, "reservation", models.AuditActionUpdate, "reservation_id", reservations.Update(st, log))
 	reg.mutate(http.MethodDelete, "/reservations/{reservation_id}", models.RoleOperator, "reservation", models.AuditActionDelete, "reservation_id", reservations.Delete(st, log))
 
-	// -- Leases (read-only) ---------------------------------------------
+	// -- Leases -----------------------------------------------------------
+	// Reads are viewer-level; the operator actions (release/abandon/force
+	// renew/delete, singly or in bulk) are RoleOperator and audited like
+	// any other mutation. /leases/bulk is registered before the
+	// /leases/{lease_id} action routes so the literal path is tried first.
 	reg.get("/leases", leases.List(st, log))
 	reg.get("/leases/{lease_id}", leases.Get(st, log))
 	reg.get("/pools/{pool_id}/leases", leases.ListByPool(st, log))
 	reg.get("/leases/by-ip/{ip_address}", leases.GetByIP(st, log))
 	reg.get("/leases/by-mac/{mac_address}", leases.GetByMAC(st, log))
+	reg.mutate(http.MethodPost, "/leases/bulk", models.RoleOperator, "lease", models.AuditActionUpdate, "", leases.Bulk(st, log))
+	reg.mutate(http.MethodPost, "/leases/{lease_id}/release", models.RoleOperator, "lease", models.AuditActionLeaseRelease, "lease_id", leases.Release(st, log))
+	reg.mutate(http.MethodPost, "/leases/{lease_id}/abandon", models.RoleOperator, "lease", models.AuditActionUpdate, "lease_id", leases.Abandon(st, log))
+	reg.mutate(http.MethodPost, "/leases/{lease_id}/renew", models.RoleOperator, "lease", models.AuditActionUpdate, "lease_id", leases.Renew(st, log))
+	reg.mutate(http.MethodDelete, "/leases/{lease_id}", models.RoleOperator, "lease", models.AuditActionDelete, "lease_id", leases.Delete(st, log))
 
 	// -- DHCP option catalog + values -------------------------------------
 	reg.get("/options", options.ListCatalog(st, log))

@@ -1369,6 +1369,7 @@ func (m *Mock) ListLeases(ctx context.Context, params ListParams) (ListResult[*m
 	scopeID := params.Filters["scope_id"]
 	poolID := params.Filters["pool_id"]
 	state := params.Filters["state"]
+	search := strings.ToLower(strings.TrimSpace(params.Search))
 	items := m.leasesMatching(func(l *models.DHCPLease) bool {
 		if poolID != "" && l.PoolID != poolID {
 			return false
@@ -1382,11 +1383,59 @@ func (m *Mock) ListLeases(ctx context.Context, params ListParams) (ListResult[*m
 		if state != "" && string(l.BindingState) != state {
 			return false
 		}
-		return true
+		return search == "" || leaseMatchesSearch(l, search)
 	})
 	limit, offset := normalizeListParams(params)
 	total := int64(len(items))
 	return ListResult[*models.DHCPLease]{Items: paginate(items, limit, offset), Total: total, Limit: limit, Offset: offset}, nil
+}
+
+// leaseMatchesSearch mirrors Postgres.ListLeases' search predicate: the one
+// query string is tried against IP, MAC and hostname so callers need not
+// know which field a term belongs to. needle must already be lowercased.
+func leaseMatchesSearch(l *models.DHCPLease, needle string) bool {
+	if strings.Contains(strings.ToLower(l.IPAddress.String()), needle) {
+		return true
+	}
+	if l.ClientMAC != nil && strings.Contains(strings.ToLower(l.ClientMAC.String()), needle) {
+		return true
+	}
+	return l.ClientHostname != nil && strings.Contains(strings.ToLower(*l.ClientHostname), needle)
+}
+
+// DeleteLease implements LeaseAdminStore.
+func (m *Mock) DeleteLease(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.leases[id]; !ok {
+		return fmt.Errorf("mock: delete lease %s: %w", id, models.ErrLeaseNotFound)
+	}
+	delete(m.leases, id)
+	return nil
+}
+
+// ForceRenewLease implements LeaseAdminStore.
+func (m *Mock) ForceRenewLease(ctx context.Context, id string, expiry time.Time) (*models.DHCPLease, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.leases[id]
+	if !ok {
+		return nil, fmt.Errorf("mock: force renew lease %s: %w", id, models.ErrLeaseNotFound)
+	}
+	now := time.Now().UTC()
+	if !expiry.After(now) {
+		return nil, fmt.Errorf("mock: force renew lease %s: new expiry not in the future: %w", id, models.ErrInvalidInput)
+	}
+	duration := expiry.Sub(now)
+	renewal := now.Add(duration / 2)
+	rebind := now.Add(duration * 7 / 8)
+	l.LeaseStart = now
+	l.LeaseEnd = expiry
+	l.RenewalTime = &renewal
+	l.RebindingTime = &rebind
+	l.BindingState = models.LeaseStateActive
+	l.UpdatedAt = now
+	return l, nil
 }
 
 func (m *Mock) GetLease(ctx context.Context, id string) (*models.DHCPLease, error) {
@@ -2522,7 +2571,7 @@ func (m *Mock) GlobalSearch(ctx context.Context, query string, entityTypes []str
 	}
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return nil, nil
+		return []*models.SearchResult{}, nil
 	}
 	wants := func(t models.SearchResultType) bool {
 		if len(entityTypes) == 0 {
@@ -2536,32 +2585,42 @@ func (m *Mock) GlobalSearch(ctx context.Context, query string, entityTypes []str
 		return false
 	}
 
-	var out []*models.SearchResult
-	add := func(t models.SearchResultType, id, title, subtitle string) {
+	out := []*models.SearchResult{}
+	add := func(t models.SearchResultType, id, title, subtitle, url string) {
 		if len(out) >= limit || !wants(t) {
 			return
 		}
-		out = append(out, &models.SearchResult{Type: t, EntityID: id, Title: title, Subtitle: subtitle, URL: "/" + string(t) + "s/" + id})
+		out = append(out, &models.SearchResult{Type: t, EntityID: id, Title: title, Subtitle: subtitle, URL: url})
 	}
 
 	for _, v := range m.vrfs {
 		if matchStr(v.Name, query) {
-			add(models.SearchResultVRF, v.ID, v.Name, "")
+			add(models.SearchResultVRF, v.ID, v.Name, "", "/ipam/vrfs/"+v.ID)
 		}
 	}
 	for _, p := range m.prefixes {
 		if p.Prefix != nil && (matchStr(p.Prefix.String(), query) || (p.Name != nil && matchStr(*p.Name, query))) {
-			add(models.SearchResultPrefix, p.ID, p.Prefix.String(), "")
+			add(models.SearchResultPrefix, p.ID, p.Prefix.String(), "", "/ipam/prefixes/"+p.ID)
+		}
+	}
+	for _, vl := range m.vlans {
+		if matchStr(vl.Name, query) || matchStr(strconv.Itoa(vl.VID), query) {
+			add(models.SearchResultVLAN, vl.ID, vl.Name, "VID "+strconv.Itoa(vl.VID), "/ipam/vlans/"+vl.ID)
+		}
+	}
+	for _, vg := range m.vlanGroups {
+		if matchStr(vg.Name, query) {
+			add(models.SearchResultVLANGroup, vg.ID, vg.Name, "", "/ipam/vlans?group="+vg.ID)
 		}
 	}
 	for _, sc := range m.scopes {
 		if matchStr(sc.Name, query) {
-			add(models.SearchResultScope, sc.ID, sc.Name, "")
+			add(models.SearchResultScope, sc.ID, sc.Name, "", "/dhcp/scopes/"+sc.ID)
 		}
 	}
 	for _, p := range m.pools {
 		if matchStr(p.Name, query) {
-			add(models.SearchResultPool, p.ID, p.Name, "")
+			add(models.SearchResultPool, p.ID, p.Name, "", "/dhcp/pools/"+p.ID)
 		}
 	}
 	for _, r := range m.reservations {
@@ -2570,7 +2629,7 @@ func (m *Mock) GlobalSearch(ctx context.Context, query string, entityTypes []str
 			hostname = *r.Hostname
 		}
 		if matchStr(hostname, query) || matchStr(r.ReservedIP.String(), query) || matchStr(r.BindingKey, query) {
-			add(models.SearchResultReservation, r.ID, r.ReservedIP.String(), hostname)
+			add(models.SearchResultReservation, r.ID, r.ReservedIP.String(), hostname, "/dhcp/pools/"+r.PoolID+"?tab=reservations")
 		}
 	}
 	for _, l := range m.leases {
@@ -2579,17 +2638,23 @@ func (m *Mock) GlobalSearch(ctx context.Context, query string, entityTypes []str
 			hostname = *l.ClientHostname
 		}
 		if matchStr(l.IPAddress.String(), query) || matchStr(hostname, query) || (l.ClientMAC != nil && matchStr(l.ClientMAC.String(), query)) {
-			add(models.SearchResultLease, l.ID, l.IPAddress.String(), hostname)
+			add(models.SearchResultLease, l.ID, l.IPAddress.String(), hostname, "/dhcp/leases/"+l.ID)
 		}
 	}
 	for _, t := range m.templates {
 		if matchStr(t.Name, query) {
-			add(models.SearchResultTemplate, t.ID, t.Name, "")
+			add(models.SearchResultTemplate, t.ID, t.Name, "", "/dhcp/templates/"+t.ID)
+		}
+	}
+	for _, o := range m.optionCatalog {
+		code := strconv.Itoa(int(o.OptionCode))
+		if matchStr(o.Name, query) || matchStr(code, query) {
+			add(models.SearchResultOption, code, o.Name, "Option "+code, "/dhcp/options?q="+code)
 		}
 	}
 	for _, c := range m.clusters {
 		if matchStr(c.Name, query) {
-			add(models.SearchResultCluster, c.ID, c.Name, "")
+			add(models.SearchResultCluster, c.ID, c.Name, "", "/ha/clusters/"+c.ID)
 		}
 	}
 	// Deliberately no 'server' or 'user' results: matches

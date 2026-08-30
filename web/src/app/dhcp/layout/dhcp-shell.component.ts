@@ -18,6 +18,7 @@ interface DhcpTab {
  */
 const DHCP_TABS: DhcpTab[] = [
   { label: 'Scopes', path: 'scopes', icon: 'dns', hint: 'DHCP scopes and their address pools' },
+  { label: 'Leases', path: 'leases', icon: 'schedule', hint: 'Every lease in the deployment, searchable' },
   { label: 'Templates', path: 'templates', icon: 'layers', hint: 'Reusable option bundles attached to scopes and pools' },
   { label: 'Options', path: 'options', icon: 'list_alt', hint: 'The IANA DHCPv4 option catalogue' },
 ];

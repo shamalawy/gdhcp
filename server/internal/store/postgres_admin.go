@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -417,24 +418,44 @@ func derefInt64(p *int64) int64 {
 // SearchStore
 // ---------------------------------------------------------------------------
 
-// GlobalSearch matches query as an IP/CIDR (inet containment) when it
-// parses as one, otherwise as a case-insensitive substring across
-// name/hostname/description/binding-key/tag-name fields, across the ten
-// SearchResultType entity kinds in one UNION query.
+// GlobalSearch runs one UNION query across every entity kind a search can
+// reach. Two matching modes are combined rather than chosen between:
+//
+//   - When the query parses as an IP or CIDR it is bound to $1 and matched
+//     structurally — prefix/scope containment, pool range membership,
+//     lease/reservation address equality.
+//   - The query is *always* also matched as a case-insensitive substring
+//     against names, descriptions, hostnames, binding keys, tag names and
+//     the text form of every address column.
+//
+// Running both is what makes "10.10.1.65" find the lease on that address
+// *and* the prefix whose description mentions it; the earlier version ran
+// the structural branch to the exclusion of the text one, so an address
+// that appeared only in a name or description was unfindable.
+//
+// Results are ranked exact title match first, then title prefix match, then
+// by entity kind, so typing a scope's full name does not bury it under
+// alphabetically-earlier partial hits.
 func (p *Postgres) GlobalSearch(ctx context.Context, query string, entityTypes []string, limit int) ([]*models.SearchResult, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return nil, nil
+		return []*models.SearchResult{}, nil
 	}
 
 	var ipArg any
-	var qArg any = query
 	if ip, ok := parseSearchIP(query); ok {
 		ipArg = ip
-		qArg = nil
+	}
+
+	// A bare integer is a plausible VLAN ID or DHCP option code; bound
+	// separately so those numeric columns can be matched exactly rather
+	// than only through a text cast.
+	var numArg any
+	if n, err := strconv.Atoi(query); err == nil {
+		numArg = n
 	}
 
 	var typesArg any
@@ -442,13 +463,13 @@ func (p *Postgres) GlobalSearch(ctx context.Context, query string, entityTypes [
 		typesArg = entityTypes
 	}
 
-	rows, err := p.pool.Query(ctx, globalSearchSQL, ipArg, qArg, typesArg, limit)
+	rows, err := p.pool.Query(ctx, globalSearchSQL, ipArg, query, typesArg, limit, escapeLikePattern(query), numArg)
 	if err != nil {
 		return nil, fmt.Errorf("store: global search: %w", err)
 	}
 	defer rows.Close()
 
-	var out []*models.SearchResult
+	out := []*models.SearchResult{}
 	for rows.Next() {
 		var r models.SearchResult
 		if err := rows.Scan(&r.Type, &r.EntityID, &r.Title, &r.Subtitle, &r.Description, &r.URL); err != nil {
@@ -456,7 +477,21 @@ func (p *Postgres) GlobalSearch(ctx context.Context, query string, entityTypes [
 		}
 		out = append(out, &r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: global search: %w", err)
+	}
+	return out, nil
+}
+
+// escapeLikePattern neutralises LIKE/ILIKE's wildcards so a query
+// containing '%' or '_' searches for those characters literally instead of
+// matching everything. Backslash is PostgreSQL's default LIKE escape
+// character, so it has to be escaped first.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
 }
 
 // parseSearchIP parses q as a bare address or CIDR, returning it as a
@@ -477,72 +512,121 @@ func parseSearchIP(q string) (string, bool) {
 	return netip.PrefixFrom(a, a.BitLen()).String(), true
 }
 
+// globalSearchSQL's parameters:
+//
+//	$1 inet   — the query as an address/CIDR, or NULL if it isn't one
+//	$2 text   — the raw query, for exact-match ranking
+//	$3 text[] — entity types to keep, or NULL for all
+//	$4 int    — row limit
+//	$5 text   — the query escaped for use inside an ILIKE pattern
+//	$6 int    — the query as an integer (VLAN ID / option code), or NULL
+//
+// Every `url` here must resolve in the Angular router (web/src/app/
+// *.routes.ts); a URL that 404s in the SPA is the same defect as no result
+// at all.
 const globalSearchSQL = `
 WITH matches AS (
 	SELECT 'vrf' AS type, v.id::text AS entity_id, v.name AS title,
 		COALESCE(v.route_distinguisher, '') AS subtitle, COALESCE(v.description, '') AS description,
-		'/vrfs/' || v.id AS url
+		'/ipam/vrfs/' || v.id AS url
 	FROM vrfs v
-	WHERE $1::inet IS NULL AND $2::text IS NOT NULL AND (
-		v.name ILIKE '%' || $2 || '%' OR COALESCE(v.description, '') ILIKE '%' || $2 || '%'
-		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'vrf' AND et.entity_id = v.id AND t.name ILIKE '%' || $2 || '%')
-	)
+	WHERE v.name ILIKE '%' || $5 || '%'
+		OR COALESCE(v.description, '') ILIKE '%' || $5 || '%'
+		OR COALESCE(v.route_distinguisher, '') ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'vrf' AND et.entity_id = v.id AND t.name ILIKE '%' || $5 || '%')
 
 	UNION ALL
-	SELECT 'prefix', pfx.id::text, COALESCE(pfx.name, host(pfx.prefix)), pfx.prefix_type::text,
+	SELECT 'prefix', pfx.id::text, COALESCE(pfx.name, host(pfx.prefix)), text(pfx.prefix),
 		COALESCE(pfx.description, ''), '/ipam/prefixes/' || pfx.id
 	FROM ipam_prefixes pfx
 	WHERE ($1::inet IS NOT NULL AND pfx.prefix && $1)
-		OR ($1::inet IS NULL AND $2::text IS NOT NULL AND (COALESCE(pfx.name, '') ILIKE '%' || $2 || '%' OR COALESCE(pfx.description, '') ILIKE '%' || $2 || '%'))
+		OR text(pfx.prefix) ILIKE '%' || $5 || '%'
+		OR COALESCE(pfx.name, '') ILIKE '%' || $5 || '%'
+		OR COALESCE(pfx.description, '') ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'prefix' AND et.entity_id = pfx.id AND t.name ILIKE '%' || $5 || '%')
 
 	UNION ALL
-	SELECT 'scope', sc.id::text, sc.name, host(sc.network::inet), COALESCE(sc.description, ''), '/scopes/' || sc.id
+	SELECT 'vlan', vl.id::text, vl.name, 'VID ' || vl.vid::text, COALESCE(vl.description, ''),
+		'/ipam/vlans/' || vl.id
+	FROM vlans vl
+	WHERE ($6::int IS NOT NULL AND vl.vid = $6)
+		OR vl.name ILIKE '%' || $5 || '%'
+		OR COALESCE(vl.description, '') ILIKE '%' || $5 || '%'
+		OR vl.vid::text ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'vlan' AND et.entity_id = vl.id AND t.name ILIKE '%' || $5 || '%')
+
+	UNION ALL
+	SELECT 'vlan_group', vg.id::text, vg.name,
+		'VID ' || vg.min_vid::text || '–' || vg.max_vid::text, COALESCE(vg.description, ''),
+		'/ipam/vlans?group=' || vg.id
+	FROM vlan_groups vg
+	WHERE vg.name ILIKE '%' || $5 || '%' OR COALESCE(vg.description, '') ILIKE '%' || $5 || '%'
+
+	UNION ALL
+	SELECT 'scope', sc.id::text, sc.name, text(sc.network), COALESCE(sc.description, ''), '/dhcp/scopes/' || sc.id
 	FROM dhcp_scopes sc
 	WHERE ($1::inet IS NOT NULL AND sc.network && $1)
-		OR ($1::inet IS NULL AND $2::text IS NOT NULL AND (
-			sc.name ILIKE '%' || $2 || '%' OR COALESCE(sc.description, '') ILIKE '%' || $2 || '%'
-			OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'scope' AND et.entity_id = sc.id AND t.name ILIKE '%' || $2 || '%')
-		))
+		OR text(sc.network) ILIKE '%' || $5 || '%'
+		OR sc.name ILIKE '%' || $5 || '%'
+		OR COALESCE(sc.description, '') ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'scope' AND et.entity_id = sc.id AND t.name ILIKE '%' || $5 || '%')
 
 	UNION ALL
-	SELECT 'pool', po.id::text, po.name, host(po.range_start) || ' - ' || host(po.range_end), COALESCE(po.description, ''), '/pools/' || po.id
+	SELECT 'pool', po.id::text, po.name, host(po.range_start) || ' - ' || host(po.range_end),
+		COALESCE(po.description, ''), '/dhcp/pools/' || po.id
 	FROM dhcp_pools po
 	WHERE ($1::inet IS NOT NULL AND po.range_start <= $1 AND $1 <= po.range_end)
-		OR ($1::inet IS NULL AND $2::text IS NOT NULL AND (
-			po.name ILIKE '%' || $2 || '%' OR COALESCE(po.description, '') ILIKE '%' || $2 || '%'
-			OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'pool' AND et.entity_id = po.id AND t.name ILIKE '%' || $2 || '%')
-		))
+		OR host(po.range_start) ILIKE '%' || $5 || '%'
+		OR host(po.range_end) ILIKE '%' || $5 || '%'
+		OR po.name ILIKE '%' || $5 || '%'
+		OR COALESCE(po.description, '') ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'pool' AND et.entity_id = po.id AND t.name ILIKE '%' || $5 || '%')
 
 	UNION ALL
-	SELECT 'reservation', r.id::text, COALESCE(r.hostname, host(r.reserved_ip)), host(r.reserved_ip), COALESCE(r.description, ''), '/reservations/' || r.id
+	SELECT 'reservation', r.id::text, COALESCE(NULLIF(r.hostname, ''), host(r.reserved_ip)),
+		host(r.reserved_ip) || ' · ' || r.binding_key, COALESCE(r.description, ''),
+		'/dhcp/pools/' || r.pool_id || '?tab=reservations'
 	FROM dhcp_reservations r
 	WHERE ($1::inet IS NOT NULL AND r.reserved_ip = $1)
-		OR ($1::inet IS NULL AND $2::text IS NOT NULL AND (
-			COALESCE(r.hostname, '') ILIKE '%' || $2 || '%' OR COALESCE(r.description, '') ILIKE '%' || $2 || '%'
-			OR r.binding_key ILIKE '%' || $2 || '%'
-			OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'reservation' AND et.entity_id = r.id AND t.name ILIKE '%' || $2 || '%')
-		))
+		OR host(r.reserved_ip) ILIKE '%' || $5 || '%'
+		OR COALESCE(r.hostname, '') ILIKE '%' || $5 || '%'
+		OR COALESCE(r.description, '') ILIKE '%' || $5 || '%'
+		OR r.binding_key ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'reservation' AND et.entity_id = r.id AND t.name ILIKE '%' || $5 || '%')
 
 	UNION ALL
-	SELECT 'lease', l.id::text, host(l.ip_address), COALESCE(l.client_mac::text, ''), COALESCE(l.client_hostname, ''), '/leases/' || l.id
+	SELECT 'lease', l.id::text, host(l.ip_address),
+		COALESCE(l.client_mac::text, '') || ' · ' || l.binding_state,
+		COALESCE(l.client_hostname, ''), '/dhcp/leases/' || l.id
 	FROM dhcp_leases l
 	WHERE ($1::inet IS NOT NULL AND l.ip_address = $1)
-		OR ($1::inet IS NULL AND $2::text IS NOT NULL AND (
-			COALESCE(l.client_hostname, '') ILIKE '%' || $2 || '%' OR COALESCE(l.client_mac::text, '') ILIKE '%' || $2 || '%'
-		))
+		OR host(l.ip_address) ILIKE '%' || $5 || '%'
+		OR COALESCE(l.client_hostname, '') ILIKE '%' || $5 || '%'
+		OR COALESCE(l.client_mac::text, '') ILIKE '%' || $5 || '%'
+		OR COALESCE(encode(l.client_id, 'hex'), '') ILIKE '%' || $5 || '%'
 
 	UNION ALL
-	SELECT 'template', t.id::text, t.name, '', COALESCE(t.description, ''), '/templates/' || t.id
+	SELECT 'template', t.id::text, t.name, '', COALESCE(t.description, ''), '/dhcp/templates/' || t.id
 	FROM dhcp_templates t
-	WHERE $1::inet IS NULL AND $2::text IS NOT NULL AND (t.name ILIKE '%' || $2 || '%' OR COALESCE(t.description, '') ILIKE '%' || $2 || '%')
+	WHERE t.name ILIKE '%' || $5 || '%' OR COALESCE(t.description, '') ILIKE '%' || $5 || '%'
 
 	UNION ALL
-	SELECT 'cluster', c.id::text, c.name, COALESCE(host(c.vip_address), ''), COALESCE(c.description, ''), '/clusters/' || c.id
+	SELECT 'option', oc.option_code::text, oc.name, 'Option ' || oc.option_code::text || ' · ' || oc.value_type,
+		oc.description, '/dhcp/options?q=' || oc.option_code::text
+	FROM dhcp_option_catalog oc
+	WHERE ($6::int IS NOT NULL AND oc.option_code = $6)
+		OR oc.name ILIKE '%' || $5 || '%'
+		OR oc.description ILIKE '%' || $5 || '%'
+
+	UNION ALL
+	SELECT 'cluster', c.id::text, c.name, COALESCE(host(c.vip_address), ''), COALESCE(c.description, ''),
+		'/ha/clusters/' || c.id
 	FROM clusters c
-	WHERE $1::inet IS NULL AND $2::text IS NOT NULL AND (
-		c.name ILIKE '%' || $2 || '%' OR COALESCE(c.description, '') ILIKE '%' || $2 || '%'
-		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'cluster' AND et.entity_id = c.id AND t.name ILIKE '%' || $2 || '%')
-	)
+	WHERE ($1::inet IS NOT NULL AND c.vip_address = $1)
+		OR c.name ILIKE '%' || $5 || '%'
+		OR COALESCE(c.description, '') ILIKE '%' || $5 || '%'
+		OR COALESCE(host(c.vip_address), '') ILIKE '%' || $5 || '%'
+		OR EXISTS (SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_type = 'cluster' AND et.entity_id = c.id AND t.name ILIKE '%' || $5 || '%')
 
 	-- Deliberately no 'server' or 'user' branches: GET /api/v1/search is
 	-- viewer-accessible (router.go's reg.get requires only RoleViewer), but
@@ -555,9 +639,42 @@ WITH matches AS (
 	-- /clusters/{cluster_id}/servers. Browse users via GET /users
 	-- (admin-only) and servers via GET /clusters/{cluster_id}/servers
 	-- instead of through this endpoint.
+),
+ranked AS (
+	SELECT type, entity_id, title, subtitle, description, url,
+		CASE
+			WHEN lower(title) = lower($2) THEN 0
+			WHEN title ILIKE $5 || '%' THEN 1
+			ELSE 2
+		END AS hit_rank,
+		CASE type
+			WHEN 'vrf' THEN 0
+			WHEN 'prefix' THEN 1
+			WHEN 'vlan' THEN 2
+			WHEN 'vlan_group' THEN 3
+			WHEN 'scope' THEN 4
+			WHEN 'pool' THEN 5
+			WHEN 'reservation' THEN 6
+			WHEN 'lease' THEN 7
+			WHEN 'template' THEN 8
+			WHEN 'option' THEN 9
+			WHEN 'cluster' THEN 10
+			ELSE 11
+		END AS type_rank
+	FROM matches
+	WHERE $3::text[] IS NULL OR type = ANY($3)
 )
+-- Cap each entity kind's share of the result set. Without this a partial
+-- address like "10.10.1" fills the whole limit with leases (thousands of
+-- them all rank as title-prefix matches) and the prefix, scope and pool
+-- that also contain that address never appear — which reads to the user as
+-- "search can't find my scope". Global search is a jump-to navigator, not a
+-- report; the per-entity list pages are where an exhaustive match belongs.
 SELECT type, entity_id, title, subtitle, description, url
-FROM matches
-WHERE $3::text[] IS NULL OR type = ANY($3)
-ORDER BY title
+FROM (
+	SELECT *, row_number() OVER (PARTITION BY type ORDER BY hit_rank, title) AS per_type
+	FROM ranked
+) capped
+WHERE per_type <= GREATEST(5, $4 / 5)
+ORDER BY hit_rank, type_rank, title
 LIMIT $4`

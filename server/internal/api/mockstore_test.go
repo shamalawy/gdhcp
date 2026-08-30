@@ -37,6 +37,8 @@ type mockStore struct {
 
 	vrfs map[string]*models.VRF
 
+	leases map[string]*models.DHCPLease
+
 	auditLogs []*models.AuditLog
 }
 
@@ -46,6 +48,7 @@ func newMockStore() *mockStore {
 		usersByUN: make(map[string]int64),
 		tokens:    make(map[string]*models.APIToken),
 		vrfs:      make(map[string]*models.VRF),
+		leases:    make(map[string]*models.DHCPLease),
 	}
 }
 
@@ -268,8 +271,22 @@ func (m *mockStore) AllocateLease(ctx context.Context, poolID string, ident mode
 func (m *mockStore) RenewLease(ctx context.Context, leaseID, clientMAC string, newExpiry time.Time, hostname *string) (*models.DHCPLease, error) {
 	return nil, models.ErrLeaseNotFound
 }
-func (m *mockStore) ReleaseLease(ctx context.Context, leaseID, clientMAC string) error { return nil }
-func (m *mockStore) AbandonLease(ctx context.Context, leaseID, clientMAC string) error { return nil }
+func (m *mockStore) ReleaseLease(ctx context.Context, leaseID, clientMAC string) error {
+	return m.setLeaseState(leaseID, models.LeaseStateReleased)
+}
+func (m *mockStore) AbandonLease(ctx context.Context, leaseID, clientMAC string) error {
+	return m.setLeaseState(leaseID, models.LeaseStateAbandoned)
+}
+func (m *mockStore) setLeaseState(leaseID string, state models.LeaseBindingState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.leases[leaseID]
+	if !ok {
+		return models.ErrLeaseNotFound
+	}
+	l.BindingState = state
+	return nil
+}
 func (m *mockStore) GetLeaseByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPLease, error) {
 	return nil, nil
 }
@@ -458,11 +475,50 @@ func (m *mockStore) UpdateReservation(ctx context.Context, r *models.DHCPReserva
 }
 func (m *mockStore) DeleteReservation(ctx context.Context, id string) error { return nil }
 
+// seedLease registers a lease so the lease-action handler tests have
+// something with real state to release/renew/delete.
+func (m *mockStore) seedLease(l *models.DHCPLease) *models.DHCPLease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if l.ID == "" {
+		l.ID = randomID()
+	}
+	m.leases[l.ID] = l
+	return l
+}
+
 func (m *mockStore) ListLeases(ctx context.Context, params store.ListParams) (store.ListResult[*models.DHCPLease], error) {
 	return store.ListResult[*models.DHCPLease]{Limit: params.Limit, Offset: params.Offset}, nil
 }
 func (m *mockStore) GetLease(ctx context.Context, id string) (*models.DHCPLease, error) {
-	return nil, models.ErrNotFound
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.leases[id]
+	if !ok {
+		return nil, models.ErrLeaseNotFound
+	}
+	return l, nil
+}
+func (m *mockStore) DeleteLease(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.leases[id]; !ok {
+		return models.ErrLeaseNotFound
+	}
+	delete(m.leases, id)
+	return nil
+}
+func (m *mockStore) ForceRenewLease(ctx context.Context, id string, expiry time.Time) (*models.DHCPLease, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.leases[id]
+	if !ok {
+		return nil, models.ErrLeaseNotFound
+	}
+	l.LeaseStart = time.Now().UTC()
+	l.LeaseEnd = expiry
+	l.BindingState = models.LeaseStateActive
+	return l, nil
 }
 func (m *mockStore) ListLeasesByPool(ctx context.Context, poolID string, params store.ListParams) (store.ListResult[*models.DHCPLease], error) {
 	return store.ListResult[*models.DHCPLease]{Limit: params.Limit, Offset: params.Offset}, nil

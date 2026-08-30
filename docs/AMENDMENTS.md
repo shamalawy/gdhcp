@@ -299,3 +299,111 @@ Reservations tab, which is why the feature read as missing. It is now reachable 
   button that asks which pool when the scope has more than one.
 
 A2's CLI verb list gains `prefix clients`.
+
+## A18. Lease management, global search correctness, and shell navigation
+Added after A17. Leases stop being a read-only resource, `GET /search` becomes usable,
+and the app shell's wordmark moves.
+
+### A18.1 Leases are operator-writable
+`docs/api/endpoints.md`'s "Lease Endpoints (Read-Only)" heading is **void** for these
+five routes; the listing/lookup routes remain read-only. New, all `RoleOperator`, all
+audited under entity type `lease`:
+
+| Route | Effect |
+| --- | --- |
+| `POST /leases/{lease_id}/release` | `binding_state → released`; the address returns to the pool. Audited as `lease_release`. |
+| `POST /leases/{lease_id}/abandon` | `binding_state → abandoned`; held back from reallocation until the reaper sweeps it. |
+| `POST /leases/{lease_id}/renew` | Force renew. Optional body `{"duration_seconds": N}`; `0`/absent reuses the lease's own `lease_end - lease_start`, falling back to 24h. |
+| `DELETE /leases/{lease_id}` | Removes the lease row. |
+| `POST /leases/bulk` | `{"action": "release"\|"abandon"\|"renew"\|"delete", "lease_ids": [...], "duration_seconds": N}` — at most 500 ids. |
+
+Release and abandon reuse the engine's `LeaseStore` methods; the handler loads the lease
+first and passes back its own recorded MAC, so an operator never supplies an identifier
+the server already holds.
+
+**Force renew is not `LeaseStore.RenewLease`.** That method is the client-driven path: it
+requires a matching MAC and an already-`active` lease. `LeaseAdminStore.ForceRenewLease`
+skips both and reactivates a lease that had expired, been released or been abandoned.
+That is safe because `UNIQUE (pool_id, ip_address)` means the row *is* that address —
+there is no second row another client could be holding it through.
+
+**Bulk is not transactional, by design.** It runs N independent store calls and answers
+`200` with `{action, succeeded, failed, results: [{lease_id, ok, error}]}`. Releasing 40
+leases where one has meanwhile been deleted must release the other 39 and say so, not
+roll back. Per-lease error strings are deliberately generic; unclassified failures are
+logged server-side, since the handler answers 200 and never reaches `RespondError`.
+
+`LeaseAdminStore` (new, in `store/interface.go`) holds `DeleteLease` and
+`ForceRenewLease` — the two mutations with no counterpart on the allocation path. Both
+adjust the pool's cached active-lease count when the state they change crosses
+`active`.
+
+`ListLeases` additionally honours `ListParams.Search`, matched case-insensitively
+against the lease's IP text, MAC text and client hostname at once, and sorts on
+`client_mac`, `client_hostname`, `binding_state` and `updated_at` as well as the
+original three.
+
+A2's CLI verb list gains `lease release|abandon|renew|delete`, each accepting several
+lease IDs (more than one routes through `/leases/bulk`).
+
+### A18.2 Global search: URLs, coverage, and the empty result
+Three defects made `GET /search` read as broken.
+
+1. **Every URL 404'd in the SPA.** The SQL emitted `/vrfs/<id>`, `/scopes/<id>`,
+   `/pools/<id>`, `/leases/<id>`, `/reservations/<id>`, `/templates/<id>`,
+   `/clusters/<id>` — none of which the Angular router mounts (only `/ipam/prefixes/<id>`
+   happened to be right). **Binding: a search result's `url` must resolve in
+   `web/src/app/**/*.routes.ts`.** The mapping is now:
+
+   | Type | URL |
+   | --- | --- |
+   | `vrf` | `/ipam/vrfs/{id}` |
+   | `prefix` | `/ipam/prefixes/{id}` |
+   | `vlan` | `/ipam/vlans/{id}` |
+   | `vlan_group` | `/ipam/vlans?group={id}` |
+   | `scope` | `/dhcp/scopes/{id}` |
+   | `pool` | `/dhcp/pools/{id}` |
+   | `reservation` | `/dhcp/pools/{pool_id}?tab=reservations` |
+   | `lease` | `/dhcp/leases/{id}` |
+   | `template` | `/dhcp/templates/{id}` |
+   | `option` | `/dhcp/options?q={option_code}` |
+   | `cluster` | `/ha/clusters/{id}` |
+
+   Reservations, VLAN groups and options have no page of their own, so they link to the
+   page that hosts them, pre-filtered — which required a `?tab=` input on the pool detail
+   page, `?q=` on the option catalogue and `?group=` on the VLAN list.
+
+2. **No match returned JSON `null`, not `[]`.** The frontend iterated it and threw, which
+   is the "something went wrong" an operator saw on any query that simply had no hits.
+   `GlobalSearch` now returns an empty slice; both callers are also `?? []` defensive.
+
+3. **Coverage was partial.** `SearchResultType` gains `vlan`, `vlan_group` and `option`.
+   The IP/CIDR branch and the substring branch now run *together* rather than the
+   structural one excluding the text one, so `10.10.1.65` finds the lease on that address
+   *and* anything whose name or description mentions it. Substring matching reaches the
+   text form of every address column (`host()`/`text()`), reservation binding keys,
+   hex-encoded lease client IDs, VLAN IDs, option codes, and `entity_tags` for prefixes
+   and VLANs as well as the kinds that already had it. LIKE wildcards in the query are
+   escaped, so searching for `%` no longer matches everything.
+
+Results are ranked exact-title, then title-prefix, then entity kind, and **each kind is
+capped at `max(5, limit/5)` rows**. Without the cap a partial address like `10.10.1` fills
+the entire limit with leases and the prefix, scope and pool containing that address never
+appear — which reads as "search can't find my scope". Global search is a jump-to
+navigator; the per-entity list pages are where an exhaustive match belongs.
+
+The 'user' and 'server' exclusion from A15's admin-only gate stands unchanged.
+
+### A18.3 Navigation
+- `/dhcp` gains a **Leases** tab: `/dhcp/leases` (every lease, searchable, with bulk
+  selection and the A18.1 actions) and `/dhcp/leases/{id}`. Leases were previously
+  reachable only by drilling scope → pool → Leases tab, which left global search with
+  nowhere to send a lease hit.
+- `dhcp/leases/leases-table.component.ts` is shared: the pool detail page's Leases tab is
+  that component with `[poolId]` set, so the two never drift apart.
+- A17.7's "pool Leases tab → Reserve" action is now labelled **Pin** and is available in
+  bulk. Pin creates a reservation from the client currently holding the address; a bulk
+  pin skips leases that identify no client and reports the tally.
+- The `gdhcp` wordmark moves from the toolbar to the top of the sidenav, above the nav it
+  belongs to, and links to `/dashboard`. The global search trigger keeps the toolbar's
+  leading position.

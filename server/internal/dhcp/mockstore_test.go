@@ -446,6 +446,10 @@ func (m *mockStore) ListLeases(ctx context.Context, params store.ListParams) (st
 func (m *mockStore) GetLease(ctx context.Context, id string) (*models.DHCPLease, error) {
 	return nil, nil
 }
+func (m *mockStore) DeleteLease(ctx context.Context, id string) error { return nil }
+func (m *mockStore) ForceRenewLease(ctx context.Context, id string, expiry time.Time) (*models.DHCPLease, error) {
+	return nil, nil
+}
 func (m *mockStore) ListLeasesByPool(ctx context.Context, poolID string, params store.ListParams) (store.ListResult[*models.DHCPLease], error) {
 	return store.ListResult[*models.DHCPLease]{}, nil
 }

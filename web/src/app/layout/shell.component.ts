@@ -8,13 +8,14 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
-import { Subject } from 'rxjs';
-import { debounceTime, distinctUntilChanged, switchMap } from 'rxjs/operators';
+import { EMPTY, Subject } from 'rxjs';
+import { catchError, debounceTime, distinctUntilChanged, switchMap } from 'rxjs/operators';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { HttpErrorResponse } from '@angular/common/http';
 
 import { ApiService } from '../shared/api.service';
 import { AuthService } from '../auth/auth.service';
-import { SearchResult } from '../shared/models';
+import { ApiErrorEnvelope, SearchEntityType, SearchResult } from '../shared/models';
 
 interface NavLink {
   label: string;
@@ -29,6 +30,48 @@ const NAV_LINKS: NavLink[] = [
   { label: 'Clusters', path: '/ha', icon: 'hub' },
   { label: 'Admin', path: '/admin', icon: 'admin_panel_settings' },
 ];
+
+/** Reading order for the overlay's result groups: the IPAM hierarchy, then
+ * DHCP configuration, then the live/runtime records. Any type the server
+ * adds later that isn't listed here is appended rather than dropped. */
+const ENTITY_TYPE_ORDER: SearchEntityType[] = [
+  'vrf',
+  'prefix',
+  'vlan',
+  'vlan_group',
+  'scope',
+  'pool',
+  'reservation',
+  'lease',
+  'template',
+  'option',
+  'cluster',
+];
+
+const ENTITY_TYPE_LABELS: Readonly<Record<SearchEntityType, string>> = {
+  vrf: 'VRFs',
+  prefix: 'Prefixes',
+  vlan: 'VLANs',
+  vlan_group: 'VLAN groups',
+  scope: 'Scopes',
+  pool: 'Pools',
+  reservation: 'Reservations',
+  lease: 'Leases',
+  template: 'Templates',
+  option: 'DHCP options',
+  cluster: 'Clusters',
+};
+
+/** The overlay shows search failures inline rather than as a toast, so it
+ * needs the error envelope's own message where there is one. */
+function describeSearchError(err: unknown): string {
+  if (err instanceof HttpErrorResponse) {
+    if (err.status === 0) return 'Search is unavailable — the server is unreachable.';
+    const body = err.error as ApiErrorEnvelope | undefined;
+    if (body?.error?.message) return `Search failed: ${body.error.message}`;
+  }
+  return 'Search failed. Please try again.';
+}
 
 const THEME_STORAGE_KEY = 'gdhcp_theme';
 type ThemePreference = 'light' | 'dark' | 'system';
@@ -70,6 +113,8 @@ function loadThemePreference(): ThemePreference {
   template: `
     <mat-sidenav-container class="shell">
       <mat-sidenav mode="side" [opened]="true" class="sidenav">
+        <a class="brand" routerLink="/dashboard" aria-label="gdhcp — go to the dashboard">gdhcp</a>
+
         <mat-nav-list class="nav-links">
           @for (link of navLinks; track link.path) {
             <a mat-list-item [routerLink]="link.path" routerLinkActive="active-link">
@@ -82,8 +127,6 @@ function loadThemePreference(): ThemePreference {
 
       <mat-sidenav-content>
         <mat-toolbar class="toolbar">
-          <span class="brand">gdhcp</span>
-
           <button
             type="button"
             class="search-trigger"
@@ -131,9 +174,10 @@ function loadThemePreference(): ThemePreference {
             <input
               #searchInput
               type="text"
-              placeholder="Search VRFs, prefixes, scopes, pools, templates…"
+              placeholder="Search prefixes, VLANs, scopes, pools, leases, reservations…"
               [(ngModel)]="searchQuery"
               (ngModelChange)="onQueryChange($event)"
+              (keydown.enter)="viewAllResults()"
             />
             <button mat-icon-button (click)="closeSearch()" aria-label="Close search">
               <mat-icon>close</mat-icon>
@@ -147,7 +191,7 @@ function loadThemePreference(): ThemePreference {
           <div class="search-groups">
             @for (group of groupedResults(); track group.type) {
               <div class="search-group">
-                <div class="group-label">{{ group.type }}</div>
+                <div class="group-label">{{ group.label }}</div>
                 @for (result of group.results; track result.entity_id) {
                   <button type="button" class="result-row" (click)="goTo(result.url)">
                     <span class="title">{{ result.title }}</span>
@@ -158,10 +202,19 @@ function loadThemePreference(): ThemePreference {
                 }
               </div>
             }
-            @if (searchQuery.trim() && !searchLoading() && groupedResults().length === 0) {
+            @if (searchError()) {
+              <p class="empty error">{{ searchError() }}</p>
+            } @else if (searchQuery.trim() && !searchLoading() && groupedResults().length === 0) {
               <p class="empty">No results for "{{ searchQuery }}"</p>
             }
           </div>
+
+          @if (searchQuery.trim()) {
+            <button type="button" class="view-all" (click)="viewAllResults()">
+              <mat-icon>manage_search</mat-icon>
+              See all results for "{{ searchQuery.trim() }}"
+            </button>
+          }
         </div>
       </div>
     }
@@ -199,9 +252,20 @@ function loadThemePreference(): ThemePreference {
         color: var(--text-primary);
       }
 
+      /* The wordmark heads the sidenav rather than the toolbar so it sits
+         above the nav it belongs to, and doubles as the way home. */
       .brand {
+        display: block;
+        padding: 12px 16px 8px;
+        font-size: 18px;
         font-weight: 600;
         letter-spacing: 0.02em;
+        color: var(--text-primary);
+        text-decoration: none;
+      }
+
+      .brand:hover {
+        color: var(--primary-color);
       }
 
       .search-trigger {
@@ -326,6 +390,36 @@ function loadThemePreference(): ThemePreference {
         font-size: 13px;
         padding: 24px;
       }
+
+      .empty.error {
+        color: var(--status-error);
+      }
+
+      .view-all {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        width: 100%;
+        border: none;
+        border-top: 1px solid var(--border-color);
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        font: inherit;
+        font-size: 13px;
+        padding: 10px;
+        cursor: pointer;
+      }
+
+      .view-all:hover {
+        background: var(--hover-bg);
+      }
+
+      .view-all mat-icon {
+        font-size: 18px;
+        width: 18px;
+        height: 18px;
+      }
     `,
   ],
 })
@@ -340,19 +434,30 @@ export class ShellComponent {
   readonly searchOpen = signal(false);
   readonly searchLoading = signal(false);
   readonly searchResults = signal<SearchResult[]>([]);
+  readonly searchError = signal<string | null>(null);
   searchQuery = '';
 
   readonly searchInputRef = viewChild<ElementRef<HTMLInputElement>>('searchInput');
 
   readonly groupedResults = computed(() => {
-    const results = this.searchResults();
+    // `?? []` is not belt-and-braces: GET /search answers `null`, not `[]`,
+    // when nothing matched, and iterating that threw before the group list
+    // was ever built — which is what made the overlay report a failure on
+    // an ordinary no-results search.
+    const results = this.searchResults() ?? [];
     const byType = new Map<string, SearchResult[]>();
     for (const result of results) {
       const bucket = byType.get(result.type) ?? [];
       bucket.push(result);
       byType.set(result.type, bucket);
     }
-    return Array.from(byType.entries()).map(([type, items]) => ({ type, results: items }));
+    return ENTITY_TYPE_ORDER.filter((type) => byType.has(type))
+      .concat(Array.from(byType.keys()).filter((t) => !ENTITY_TYPE_ORDER.includes(t as SearchEntityType)) as SearchEntityType[])
+      .map((type) => ({
+        type,
+        label: ENTITY_TYPE_LABELS[type as SearchEntityType] ?? type,
+        results: byType.get(type) ?? [],
+      }));
   });
 
   private readonly themeSignal = signal<ThemePreference>(loadThemePreference());
@@ -393,16 +498,28 @@ export class ShellComponent {
         switchMap((q) => {
           if (!q.trim()) {
             this.searchResults.set([]);
-            return [];
+            this.searchError.set(null);
+            return EMPTY;
           }
           this.searchLoading.set(true);
-          return this.api.search(q.trim(), undefined, 50);
+          this.searchError.set(null);
+          // catchError sits *inside* switchMap on purpose: an error that
+          // reaches the outer stream terminates the subscription, and the
+          // search box then stays dead for the rest of the session.
+          return this.api.search(q.trim(), undefined, 50).pipe(
+            catchError((err: unknown) => {
+              this.searchLoading.set(false);
+              this.searchResults.set([]);
+              this.searchError.set(describeSearchError(err));
+              return EMPTY;
+            }),
+          );
         }),
         takeUntilDestroyed(),
       )
       .subscribe((results) => {
         this.searchLoading.set(false);
-        this.searchResults.set(results);
+        this.searchResults.set(results ?? []);
       });
   }
 
@@ -425,6 +542,16 @@ export class ShellComponent {
     this.searchOpen.set(false);
     this.searchQuery = '';
     this.searchResults.set([]);
+    this.searchError.set(null);
+  }
+
+  /** Hand the query to the full results page, which paginates and shows
+   * every type rather than the overlay's shortlist. */
+  viewAllResults(): void {
+    const q = this.searchQuery.trim();
+    if (!q) return;
+    this.closeSearch();
+    void this.router.navigate(['/ipam/search'], { queryParams: { q } });
   }
 
   onQueryChange(value: string): void {

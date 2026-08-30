@@ -301,7 +301,18 @@ export interface IpamTreeNode {
 // No 'user' or 'server': GET /search never returns either (see
 // postgres_admin.go's globalSearchSQL) — the user directory stays behind
 // the admin-only /users endpoints instead of this viewer-accessible one.
-export type SearchEntityType = 'vrf' | 'prefix' | 'scope' | 'pool' | 'reservation' | 'lease' | 'template' | 'cluster';
+export type SearchEntityType =
+  | 'vrf'
+  | 'prefix'
+  | 'vlan'
+  | 'vlan_group'
+  | 'scope'
+  | 'pool'
+  | 'reservation'
+  | 'lease'
+  | 'template'
+  | 'option'
+  | 'cluster';
 
 export interface SearchResult {
   type: SearchEntityType;
@@ -472,7 +483,7 @@ export interface DHCPClient {
 }
 
 // ---------------------------------------------------------------------------
-// Leases (read-only)
+// Leases
 // ---------------------------------------------------------------------------
 
 export type LeaseBindingState = 'active' | 'expired' | 'released' | 'abandoned';
@@ -495,6 +506,32 @@ export interface DHCPLease {
   rebinding_time: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** The operator actions POST /leases/bulk accepts, and that each lease
+ * exposes individually at /leases/{id}/<action>. */
+export type LeaseAction = 'release' | 'abandon' | 'renew' | 'delete';
+
+export interface LeaseBulkRequest {
+  action: LeaseAction;
+  lease_ids: string[];
+  /** Renew only; 0/omitted reuses each lease's own original duration. */
+  duration_seconds?: number;
+}
+
+export interface LeaseBulkResult {
+  lease_id: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** A bulk action reports per-lease outcomes instead of failing as a whole,
+ * so `failed > 0` alongside `succeeded > 0` is a normal partial result. */
+export interface LeaseBulkResponse {
+  action: LeaseAction;
+  succeeded: number;
+  failed: number;
+  results: LeaseBulkResult[];
 }
 
 // ---------------------------------------------------------------------------

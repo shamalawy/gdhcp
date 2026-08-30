@@ -4,11 +4,12 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { Router, RouterLink } from '@angular/router';
-import { Subject } from 'rxjs';
-import { debounceTime, distinctUntilChanged, switchMap } from 'rxjs/operators';
+import { EMPTY, Subject } from 'rxjs';
+import { catchError, debounceTime, distinctUntilChanged, switchMap } from 'rxjs/operators';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 
 import { ApiService } from '../../shared/api.service';
+import { extractApiError } from '../util/api-error.util';
 import { SearchEntityType, SearchResult } from '../../shared/models';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
@@ -21,22 +22,28 @@ interface EntityTypeMeta {
 const ENTITY_TYPE_META: Readonly<Record<SearchEntityType, EntityTypeMeta>> = {
   vrf: { label: 'VRFs', icon: 'lan' },
   prefix: { label: 'Prefixes', icon: 'account_tree' },
+  vlan: { label: 'VLANs', icon: 'settings_ethernet' },
+  vlan_group: { label: 'VLAN groups', icon: 'workspaces' },
   scope: { label: 'DHCP scopes', icon: 'dns' },
   pool: { label: 'Pools', icon: 'water_drop' },
   reservation: { label: 'Reservations', icon: 'bookmark' },
   lease: { label: 'Leases', icon: 'schedule' },
   template: { label: 'Templates', icon: 'description' },
+  option: { label: 'DHCP options', icon: 'list_alt' },
   cluster: { label: 'Clusters', icon: 'hub' },
 };
 
 const ENTITY_TYPE_ORDER: readonly SearchEntityType[] = [
   'vrf',
   'prefix',
+  'vlan',
+  'vlan_group',
   'scope',
   'pool',
   'reservation',
   'lease',
   'template',
+  'option',
   'cluster',
 ];
 
@@ -74,13 +81,15 @@ const FALLBACK_META: EntityTypeMeta = { label: 'Other', icon: 'search' };
       <mat-icon matPrefix>search</mat-icon>
       <input
         matInput
-        placeholder="Search VRFs, prefixes, scopes, pools, reservations, leases, templates, clusters…"
+        placeholder="Search prefixes, VLANs, scopes, pools, reservations, leases, templates, options, clusters…"
         [(ngModel)]="queryText"
         (ngModelChange)="onQueryChange($event)"
       />
     </mat-form-field>
 
-    @if (!queryText.trim()) {
+    @if (errorMessage()) {
+      <app-empty-state icon="error_outline" title="Search failed" [message]="errorMessage()!" />
+    } @else if (!queryText.trim()) {
       <app-empty-state icon="search" title="Search gdhcp" message="Type at least one character to search." />
     } @else if (loading()) {
       <div class="skeleton-list">
@@ -219,12 +228,15 @@ export class IpamSearchComponent {
   readonly loading = signal(false);
   readonly results = signal<SearchResult[]>([]);
   readonly lastQuery = signal('');
+  readonly errorMessage = signal<string | null>(null);
 
   private readonly query$ = new Subject<string>();
 
   readonly groups = computed<ResultGroup[]>(() => {
     const byType = new Map<string, SearchResult[]>();
-    for (const result of this.results()) {
+    // GET /search answers `null` rather than `[]` for a no-match query;
+    // iterating that threw and surfaced as a generic failure.
+    for (const result of this.results() ?? []) {
       const bucket = byType.get(result.type) ?? [];
       bucket.push(result);
       byType.set(result.type, bucket);
@@ -260,15 +272,28 @@ export class IpamSearchComponent {
         distinctUntilChanged(),
         switchMap((query) => {
           const trimmed = query.trim();
-          if (!trimmed) return [];
+          if (!trimmed) {
+            this.errorMessage.set(null);
+            return EMPTY;
+          }
           this.loading.set(true);
-          return this.api.search(trimmed, undefined, 200);
+          this.errorMessage.set(null);
+          // Caught inside switchMap so one failed request doesn't tear down
+          // the subscription and leave the page permanently unsearchable.
+          return this.api.search(trimmed, undefined, 200).pipe(
+            catchError((err: unknown) => {
+              this.loading.set(false);
+              this.results.set([]);
+              this.errorMessage.set(extractApiError(err, 'Search failed. Please try again.').message);
+              return EMPTY;
+            }),
+          );
         }),
         takeUntilDestroyed(),
       )
       .subscribe((results) => {
         this.loading.set(false);
-        this.results.set(results);
+        this.results.set(results ?? []);
         this.lastQuery.set(this.queryText.trim());
       });
   }

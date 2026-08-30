@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, input, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -225,7 +225,17 @@ export class VlansListComponent {
   groupFilter = '';
   statusFilter = '';
 
+  /** `?group=` from the query string (withComponentInputBinding). Global
+   * search links a VLAN-group hit to this list pre-filtered to that group,
+   * since groups have no detail page of their own. */
+  readonly group = input<string>('');
+
   constructor() {
+    // Applied once, before the first load, so the initial request already
+    // carries the filter instead of firing twice.
+    const initialGroup = this.group();
+    if (initialGroup) this.groupFilter = initialGroup;
+
     this.api
       .listVLANGroups({ limit: 200 })
       .pipe(

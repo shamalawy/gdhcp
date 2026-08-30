@@ -26,6 +26,8 @@ import {
   CreateVRFRequest,
   DHCPClient,
   DHCPLease,
+  LeaseBulkRequest,
+  LeaseBulkResponse,
   DHCPOption,
   DHCPPool,
   DHCPReservation,
@@ -377,7 +379,7 @@ export class ApiService {
     return this.remove(`/reservations/${reservationId}`);
   }
 
-  // -- Leases (read-only) -----------------------------------------------------
+  // -- Leases ------------------------------------------------------------------
 
   listLeases(
     params?: ListParams & { scope_id?: string; pool_id?: string; state?: string },
@@ -402,6 +404,31 @@ export class ApiService {
 
   getLeasesByMac(macAddress: string): Observable<DHCPLease[]> {
     return this.listArray<DHCPLease>(`/leases/by-mac/${encodeURIComponent(macAddress)}`);
+  }
+
+  releaseLease(leaseId: string): Observable<MessageResponse> {
+    return this.http.post<MessageResponse>(`${BASE}/leases/${leaseId}/release`, {});
+  }
+
+  abandonLease(leaseId: string): Observable<MessageResponse> {
+    return this.http.post<MessageResponse>(`${BASE}/leases/${leaseId}/abandon`, {});
+  }
+
+  /** `durationSeconds` of 0/undefined reuses the lease's own original duration. */
+  renewLease(leaseId: string, durationSeconds?: number): Observable<DHCPLease> {
+    return this.http.post<DHCPLease>(`${BASE}/leases/${leaseId}/renew`, {
+      duration_seconds: durationSeconds ?? 0,
+    });
+  }
+
+  deleteLease(leaseId: string): Observable<MessageResponse> {
+    return this.remove(`/leases/${leaseId}`);
+  }
+
+  /** One action over many leases in a single call. Resolves with a
+   * per-lease breakdown even when some of them failed. */
+  bulkLeaseAction(body: LeaseBulkRequest): Observable<LeaseBulkResponse> {
+    return this.http.post<LeaseBulkResponse>(`${BASE}/leases/bulk`, body);
   }
 
   // -- DHCP options -----------------------------------------------------------

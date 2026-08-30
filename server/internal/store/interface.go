@@ -495,11 +495,14 @@ type ReservationStore interface {
 
 // LeaseQueryStore provides the read-only listing/lookup surface
 // docs/api/endpoints.md's "Lease Endpoints (Read-Only)" needs beyond
-// LeaseStore's allocation-path methods. Leases have no Create/Update/Delete
-// via the API — only the DHCP engine (LeaseStore) and CLI/HA admin tooling
-// mutate them.
+// LeaseStore's allocation-path methods. Operator-driven lease mutations
+// live in LeaseAdminStore and on LeaseStore (release/abandon/renew); the
+// "read-only" in that endpoints.md heading is now scoped to the listing
+// routes only.
 type LeaseQueryStore interface {
-	// ListLeases supports filters "scope_id", "pool_id", "state".
+	// ListLeases supports filters "scope_id", "pool_id", "state" plus
+	// ListParams.Search, matched as a case-insensitive substring against
+	// the lease's IP, MAC and client hostname.
 	ListLeases(ctx context.Context, params ListParams) (ListResult[*models.DHCPLease], error)
 	GetLease(ctx context.Context, id string) (*models.DHCPLease, error)
 	ListLeasesByPool(ctx context.Context, poolID string, params ListParams) (ListResult[*models.DHCPLease], error)
@@ -512,6 +515,29 @@ type LeaseQueryStore interface {
 	// ListLeasesByMAC returns every lease (active or historical, across
 	// pools) bound to mac, for GET /api/v1/leases/by-mac/{mac_address}.
 	ListLeasesByMAC(ctx context.Context, mac string) ([]*models.DHCPLease, error)
+}
+
+// LeaseAdminStore holds the one operator-driven lease mutation that has no
+// counterpart on the DHCP engine's allocation path. Release, abandon and
+// renew are the engine's own LeaseStore methods, reused as-is by the API's
+// lease action endpoints; deletion exists only for operators, so it lives
+// here.
+type LeaseAdminStore interface {
+	// DeleteLease removes the lease row outright. Deleting an active lease
+	// also decrements the pool's cached active-lease count, so the
+	// dashboard rollup stays consistent. Returns models.ErrLeaseNotFound if
+	// no such lease exists.
+	DeleteLease(ctx context.Context, id string) error
+
+	// ForceRenewLease extends a lease to expiry on an operator's say-so,
+	// without the MAC check or the active-state precondition
+	// LeaseStore.RenewLease applies to the client-driven renewal path. A
+	// lease that had expired, been released or been abandoned is put back
+	// into 'active' — safe because the (pool_id, ip_address) unique
+	// constraint means this row *is* that address: there is no second row
+	// another client could be holding it through. Returns
+	// models.ErrLeaseNotFound if no such lease exists.
+	ForceRenewLease(ctx context.Context, id string, expiry time.Time) (*models.DHCPLease, error)
 }
 
 // OptionCatalogStore provides CRUD + List over the IANA/custom DHCP option
@@ -646,6 +672,7 @@ type Store interface {
 	PoolStore
 	ReservationStore
 	LeaseQueryStore
+	LeaseAdminStore
 	OptionCatalogStore
 	OptionValueStore
 	TemplateStore

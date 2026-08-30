@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, inject, input, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
@@ -127,6 +127,12 @@ export class OptionsCatalogComponent {
   readonly catalogSvc = inject(OptionCatalogService);
 
   readonly query = signal('');
+
+  /** `?q=` from the query string (withComponentInputBinding). Global search
+   * links an option hit here with the option's code, since the catalogue is
+   * a single filterable page rather than one page per option. */
+  readonly q = input<string>('');
+
   private readonly usageByCode = signal<Map<number, number>>(new Map());
 
   readonly filtered = computed(() => {
@@ -137,6 +143,16 @@ export class OptionsCatalogComponent {
   });
 
   constructor() {
+    // Seed the filter from the URL, but only while the box is untouched, so
+    // arriving with ?q= doesn't fight what the user types next.
+    effect(
+      () => {
+        const initial = this.q();
+        if (initial && !this.query()) this.query.set(initial);
+      },
+      { allowSignalWrites: true },
+    );
+
     this.catalogSvc.ensureLoaded();
     this.api.listOptions({ limit: 1000 }).subscribe({
       next: (page) => {

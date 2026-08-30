@@ -23,7 +23,7 @@ database-per-node.
 | Option system | Full IANA DHCPv4 option catalog (codes 1–254), with inheritance across global → template → scope → pool → reservation |
 | HA clustering | Multi-node clusters, heartbeat + election stored in Postgres, VIP failover via netlink + gratuitous ARP, manual failover from the CLI/API |
 | REST API | `snake_case` JSON, JWT session auth + long-lived API tokens, RBAC (`admin`/`operator`/`viewer`), SSE endpoint for live dashboard/lease/cluster updates |
-| Web UI | Angular 18, standalone components, signals — dashboard, IPAM, DHCP (scopes/pools/reservations/templates), HA, and admin (users/tokens) areas |
+| Web UI | Angular 18, standalone components, signals — dashboard, IPAM, DHCP (scopes/pools/leases/reservations/templates), HA, and admin (users/tokens) areas. The leases page searches every lease by IP/MAC/hostname and bulk-applies pin (reserve), force renew, release, abandon and delete |
 | CLI | The same binary, pointed at a running server over HTTP — `gdhcp vrf`, `gdhcp prefix`, `gdhcp scope`, `gdhcp pool`, `gdhcp lease`, `gdhcp cluster`, `gdhcp ha`, `gdhcp user`, `gdhcp search`, ... (reservations are under `pool reservation`; clients are under `prefix clients`) |
 | Metrics | Prometheus endpoint, separate port from the API |
 
@@ -154,6 +154,8 @@ gdhcp vrf list
 gdhcp scope create ...
 gdhcp pool list --scope-id <id>
 gdhcp lease list --scope-id <id>
+gdhcp lease list --search laptop-01      # match IP, MAC or hostname
+gdhcp lease release <id> [<id>...]       # also: abandon | renew | delete
 gdhcp ha status                          # this node's health/HA role
 gdhcp cluster failover <cluster-id> --target-server-id <server-id>
 gdhcp search "10.0.0"                    # search across VRFs, scopes,

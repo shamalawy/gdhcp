@@ -1,6 +1,8 @@
-// Package leases implements the read-only Lease Endpoints of
-// docs/api/endpoints.md. Leases have no Create/Update/Delete via the API —
-// only the DHCP engine and CLI/HA admin tooling mutate them.
+// Package leases implements the Lease Endpoints of docs/api/endpoints.md.
+// The listing/lookup routes in this file are read-only; the operator
+// actions an address needs day to day — release, abandon, force renew and
+// delete, singly or in bulk — live in actions.go and are gated on the
+// operator role.
 package leases
 
 import (

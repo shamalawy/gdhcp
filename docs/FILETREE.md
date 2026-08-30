@@ -183,7 +183,8 @@ server/internal/
 │   ├── reservations/
 │   │   └── handler.go               # CRUD /api/v1/reservations
 │   ├── leases/
-│   │   └── handler.go               # GET (read-only) /api/v1/leases
+│   │   ├── handler.go               # GET /api/v1/leases (listing/lookup)
+│   │   └── actions.go               # release/abandon/renew/delete + /leases/bulk
 │   ├── options/
 │   │   └── handler.go               # CRUD /api/v1/options, GET /api/v1/options/catalog
 │   ├── templates/

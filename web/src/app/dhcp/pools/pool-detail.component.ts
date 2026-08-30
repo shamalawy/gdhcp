@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, effect, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, effect, inject, input, signal } from '@angular/core';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTabsModule } from '@angular/material/tabs';
 import { forkJoin, of } from 'rxjs';
@@ -53,7 +53,7 @@ import { PoolOptionsTabComponent } from './pool-options-tab.component';
           <span class="subtitle gdhcp-mono">{{ pool.range_start }} – {{ pool.range_end }}</span>
         </app-page-header>
 
-        <mat-tab-group animationDuration="150ms">
+        <mat-tab-group animationDuration="150ms" [selectedIndex]="selectedTabIndex()">
           <mat-tab label="Overview">
             <ng-template matTabContent>
               <app-pool-overview-tab [pool]="pool" (updated)="onPoolUpdated($event)" />
@@ -94,6 +94,19 @@ export class PoolDetailComponent {
   private readonly notify = inject(NotifyService);
 
   readonly id = input.required<string>();
+
+  /** `?tab=` from the query string (withComponentInputBinding). Global
+   * search links a reservation hit to this page's Reservations tab, since a
+   * reservation has no page of its own. */
+  readonly tab = input<string | undefined>(undefined);
+
+  /** Tab order must match the <mat-tab> order in the template. */
+  private static readonly TAB_NAMES = ['overview', 'reservations', 'leases', 'options'];
+
+  readonly selectedTabIndex = computed(() => {
+    const index = PoolDetailComponent.TAB_NAMES.indexOf((this.tab() ?? '').toLowerCase());
+    return index >= 0 ? index : 0;
+  });
 
   readonly loading = signal(true);
   readonly pool = signal<DHCPPool | null>(null);

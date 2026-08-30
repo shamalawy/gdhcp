@@ -54,7 +54,26 @@
 | DELETE | `/prefixes/{prefix_id}` | - | - | `{message}` | 204/404 | Delete prefix (no children) |
 | GET | `/prefixes/{prefix_id}/clients` | `limit, offset, sort, search, kind, state` | - | `[DHCPClient]` + pag | 200 | List leases + reservations in prefix and descendants |
 | GET | `/ipam/tree` | `vrf_id, depth, parent_id` | - | Tree structure | 200 | Hierarchical tree (lazy-loaded) |
-| GET | `/search` | `q, entity_types, limit` | - | `[SearchResult]` | 200 | Global search across entities |
+| GET | `/search` | `q, entity_types, limit` | - | `[SearchResult]` | 200 | Global search across entities (see below) |
+
+### Global search
+
+`q` is matched two ways at once: structurally when it parses as an IP or CIDR (prefix and
+scope containment, pool range membership, lease/reservation/VIP address equality), and as
+a case-insensitive substring against names, descriptions, hostnames, address text,
+reservation binding keys, hex lease client IDs, VLAN IDs, option codes and tag names.
+LIKE wildcards in `q` are escaped and match literally.
+
+`entity_types` is a comma-separated filter over: `vrf`, `prefix`, `vlan`, `vlan_group`,
+`scope`, `pool`, `reservation`, `lease`, `template`, `option`, `cluster`. `user` and
+`server` are never returned — this route is viewer-accessible and the user directory is
+admin-only (amendment A15).
+
+A `SearchResult` is `{type, entity_id, title, subtitle?, description?, url}`. **`url` is a
+frontend route** and is guaranteed to resolve in the SPA (amendment A18.2 lists the
+mapping); results are ranked exact-title, then title-prefix, then entity kind, with each
+kind capped at `max(5, limit/5)` rows so one noisy kind cannot crowd out the rest. A query
+with no matches returns `[]`, never `null`.
 
 ---
 
@@ -99,17 +118,44 @@
 
 ---
 
-## Lease Endpoints (Read-Only)
+## Lease Endpoints
 
 | Method | Path | Query | Request | Response | Status | Notes |
 |--------|------|-------|---------|----------|--------|-------|
-| GET | `/leases` | `limit, offset, cursor, sort, scope_id, pool_id, state` | - | `[DHCPLease]` + pag | 200 | List all leases (filterable) |
+| GET | `/leases` | `limit, offset, cursor, sort, search, scope_id, pool_id, state` | - | `[DHCPLease]` + pag | 200 | List all leases (filterable). `search` matches IP, MAC or hostname |
 | GET | `/leases/{lease_id}` | - | - | `DHCPLease` | 200/404 | Get lease |
-| GET | `/pools/{pool_id}/leases` | `limit, offset, state` | - | `[DHCPLease]` + pag | 200 | List leases in pool |
+| GET | `/pools/{pool_id}/leases` | `limit, offset, search, state` | - | `[DHCPLease]` + pag | 200 | List leases in pool |
 | GET | `/leases/by-ip/{ip_address}` | - | - | `DHCPLease` | 200/404 | Get lease by IP |
 | GET | `/leases/by-mac/{mac_address}` | - | - | `[DHCPLease]` | 200 | Get leases by MAC |
+| POST | `/leases/{lease_id}/release` | - | - | `{message}` | 200/404 | Release: address returns to the pool |
+| POST | `/leases/{lease_id}/abandon` | - | - | `{message}` | 200/404 | Abandon: in use on the wire, held back from reallocation |
+| POST | `/leases/{lease_id}/renew` | - | `{duration_seconds?}` | `DHCPLease` | 200/400/404 | Force renew; reactivates a lapsed lease |
+| DELETE | `/leases/{lease_id}` | - | - | `{message}` | 200/404 | Delete the lease record |
+| POST | `/leases/bulk` | - | `{action, lease_ids, duration_seconds?}` | `LeaseBulkResponse` | 200/400 | One action over up to 500 leases |
 
-**Note**: Lease endpoint is read-only (no POST/PUT/DELETE). Leases managed internally by DHCP engine. Manual release via CLI/HA admin tool.
+**Reads** are `RoleViewer`; **the five action routes are `RoleOperator`** and audited under
+entity type `lease` (see amendment A18.1). Allocation and renewal on the wire remain the
+DHCP engine's own business — these routes are the operator's override.
+
+`POST /leases/{lease_id}/renew` with no body, or `duration_seconds: 0`, reuses the lease's
+own original duration (`lease_end - lease_start`), falling back to 24h.
+
+`POST /leases/bulk` takes `action` of `release`, `abandon`, `renew` or `delete`. It is
+**not transactional**: it answers `200` with a per-lease breakdown so a partially
+successful action is reportable rather than rolled back.
+
+```json
+{
+  "action": "release",
+  "succeeded": 2,
+  "failed": 1,
+  "results": [
+    { "lease_id": "3f1c…", "ok": true },
+    { "lease_id": "8a20…", "ok": true },
+    { "lease_id": "0000…", "ok": false, "error": "lease not found" }
+  ]
+}
+```
 
 ---
 
