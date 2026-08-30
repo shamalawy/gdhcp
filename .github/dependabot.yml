@@ -31,6 +31,19 @@ updates:
     allow:
       - dependency-type: "production"
       - dependency-type: "development"
+    # The frontend is pinned to Angular 18 on purpose (amendment A9), and the
+    # whole @angular/* set has to move together. Major bumps opened one package
+    # at a time cannot pass CI, so they are handled as a deliberate migration
+    # rather than as dependency noise. Patch and minor updates still come through.
+    ignore:
+      - dependency-name: "@angular/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@angular-devkit/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "zone.js"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"

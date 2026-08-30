@@ -10,8 +10,8 @@ jobs:
     name: web build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "npm"
@@ -20,7 +20,7 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -47,13 +47,13 @@ jobs:
     env:
       GDHCP_DATABASE_DSN: "postgres://gdhcp:gdhcp@localhost:5432/gdhcp?sslmode=disable"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache: true
       - name: download web build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -63,7 +63,7 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 go build -trimpath -o dist/gdhcp ./server/cmd/gdhcp
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gdhcp-linux-amd64
           path: dist/gdhcp
@@ -73,7 +73,7 @@ jobs:
     name: shell script syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: bash -n every script
         run: |
           set -euo pipefail
