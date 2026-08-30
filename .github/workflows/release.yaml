@@ -4,15 +4,16 @@ name: Release
 # or manually via workflow_dispatch as a DRY RUN.
 #
 # The dry run builds every artifact but publishes none of them: `github.ref_name` on a
-# manual dispatch is a branch name, so publishing would push a ghcr.io image tagged with
-# the branch and cut a GitHub Release named after it. The `startsWith(github.ref,
-# 'refs/tags/')` guards below are what keep that from happening — do not remove them to
-# "simplify" the file.
+# manual dispatch is a branch name, so publishing would cut a GitHub Release named after
+# the branch. The `startsWith(github.ref, 'refs/tags/')` guard on publish-release is what
+# keeps that from happening — do not remove it to "simplify" the file.
+#
+# There is deliberately no container-image job yet. Publishing to ghcr.io is planned but
+# not wired up; deploy/docker/Dockerfile still builds locally in the meantime.
 #
 # Artifacts on a tag:
 #   - gdhcp-<tag>-linux-{amd64,arm64}.tar.gz + SHA256SUMS.txt
 #   - .deb and .rpm for both architectures
-#   - multi-arch image on ghcr.io/shamalawy/gdhcp
 #   - a GitHub Release carrying all of the above
 
 on:
@@ -122,75 +123,9 @@ jobs:
           path: dist/packages
           retention-days: 7
 
-  container-image:
-    name: build (and on a tag, push) the container image
-    needs: web
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    env:
-      IMAGE: ghcr.io/shamalawy/gdhcp
-    steps:
-      - uses: actions/checkout@v7
-      - name: derive build metadata
-        id: meta
-        run: |
-          set -euo pipefail
-          VERSION="${{ github.ref_name }}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "version_no_v=${VERSION#v}" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-      - name: compute image tags
-        id: tags
-        # :latest only for a final release — a prerelease tag (anything with a
-        # hyphen, e.g. v0.1.0-rc.1) must not become the default pull.
-        run: |
-          set -euo pipefail
-          V="${{ steps.meta.outputs.version }}"
-          {
-            echo "value<<EOF"
-            echo "${{ env.IMAGE }}:${V}"
-            echo "${{ env.IMAGE }}:${V#v}"
-            case "$V" in *-*) ;; *) echo "${{ env.IMAGE }}:latest" ;; esac
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - name: log in to ghcr.io
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: build and push multi-arch image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./deploy/docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          # Dry runs build both architectures but never push.
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            BUILD_TIME=${{ steps.meta.outputs.build_time }}
-            GIT_COMMIT=${{ steps.meta.outputs.commit }}
-          tags: ${{ steps.tags.outputs.value }}
-          labels: |
-            org.opencontainers.image.title=gdhcp
-            org.opencontainers.image.description=High-availability DHCPv4 server with built-in IPAM
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.created=${{ steps.meta.outputs.build_time }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=https://github.com/shamalawy/gdhcp
-            org.opencontainers.image.documentation=https://github.com/shamalawy/gdhcp/blob/main/docs/MANUAL.md
-            org.opencontainers.image.licenses=MIT
-
   publish-release:
     name: publish the GitHub Release
-    needs: [build-tarballs, build-packages, container-image]
+    needs: [build-tarballs, build-packages]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

@@ -75,8 +75,10 @@
             <p>This is a minimal placeholder. To use the full web interface, choose one:</p>
             <ol>
                 <li><strong>Build from source:</strong> <code>make build</code></li>
-                <li><strong>Use the container image:</strong> <code>docker pull ghcr.io/shamalawy/gdhcp:latest</code></li>
-                <li><strong>Install from package:</strong> Visit <a href="https://github.com/shamalawy/gdhcp">github.com/shamalawy/gdhcp</a></li>
+                <li><strong>Download a release build:</strong> the tarballs and .deb/.rpm packages at
+                    <a href="https://github.com/shamalawy/gdhcp/releases">github.com/shamalawy/gdhcp/releases</a>
+                    all ship with the UI already embedded</li>
+                <li><strong>Run the Docker Compose stack:</strong> <code>docker compose -f deploy/docker/docker-compose.yml up -d --build</code></li>
             </ol>
         </div>
 
