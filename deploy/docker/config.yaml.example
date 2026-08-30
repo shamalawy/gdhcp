@@ -1,0 +1,66 @@
+# gdhcp configuration for the Docker Compose stack (deploy/docker/docker-compose.yml).
+# Copy to deploy/docker/config.yaml before `docker compose up` — that file is
+# bind-mounted read-only into gdhcp_server at /etc/gdhcp/config.yaml and is
+# gitignored so real secrets never get committed.
+#
+# Every value here can also be overridden with a GDHCP_<SECTION>_<FIELD>
+# environment variable (see server/internal/config/loader.go); the compose
+# file already does this for database.dsn and logging.level so the two
+# don't drift.
+
+server:
+  api_addr: "0.0.0.0:8080"
+  api_tls_enabled: false
+  # Set an explicit value for any real deployment — left empty, gdhcp
+  # generates a random secret at startup and every session is invalidated
+  # on container restart.
+  jwt_secret: ""
+
+database:
+  # gdhcp_server runs with network_mode: host, so gdhcp_postgres (also
+  # host-networked, listening on 127.0.0.1:5432) is reached at localhost.
+  dsn: "postgres://gdhcp:gdhcp_dev_password@localhost:5432/gdhcp?sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "5m"
+  lease_retention_days: 90
+  option_cache_ttl: "60s"
+
+dhcp:
+  # Empty = API/UI-only mode, no DHCP listeners (amendment A11) — the safe
+  # default for a first `docker compose up`. Add real host interfaces once
+  # you've confirmed host networking and capabilities are working:
+  interfaces: []
+  # interfaces:
+  #   - name: "eth0"
+  #     vrf_id: "default"
+  default_lease_time: 86400
+  default_renewal_time: 43200
+  default_rebind_time: 75600
+
+ha:
+  # Single-container stacks stay standalone. Flip to true only when running
+  # multiple gdhcp_server containers on different hosts sharing this
+  # database (see docs/deploy/docker.md for the two-node walkthrough).
+  enabled: false
+  cluster_id: "compose-cluster"
+  server_id: "gdhcp-server"
+  server_name: "gdhcp-server"
+  node_id: 1
+  vip_address: "10.0.0.10/24"
+  vip_interface: "eth0"
+  heartbeat_interval_ms: 1000
+  heartbeat_ttl_ms: 3000
+  election_interval_ms: 2000
+  config_check_interval_ms: 5000
+  config_listen_enabled: true
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+metrics:
+  enabled: true
+  listen_addr: "0.0.0.0:9090"
+  path: "/metrics"

@@ -1,0 +1,15 @@
+# Runs once, only on first cluster init (empty PGDATA), via Postgres's
+# docker-entrypoint-initdb.d mechanism. gdhcp's own migration 0001
+# (server/internal/db/migrations) creates btree_gist itself too, so this is
+# a convenience for environments that lock down CREATE EXTENSION to
+# superuser-at-initdb-time rather than app-time DDL — safe to leave in
+# either way since both use IF NOT EXISTS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gdhcp-postgres-init
+  labels:
+    app.kubernetes.io/component: database
+data:
+  01-extensions.sql: |
+    CREATE EXTENSION IF NOT EXISTS btree_gist;

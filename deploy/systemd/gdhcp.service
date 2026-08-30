@@ -1,0 +1,61 @@
+# gdhcp systemd unit — bare-metal deployment.
+# Install: scripts/install.sh does this automatically; for a manual install:
+#   sudo cp deploy/systemd/gdhcp.service /etc/systemd/system/gdhcp.service
+#   sudo cp deploy/systemd/gdhcp.env /etc/gdhcp/gdhcp.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gdhcp
+#
+# NOTE: deploy/systemd/gdhcp.socket does NOT exist and is not expected —
+# gdhcp does not support systemd socket activation. It opens its own
+# listeners (DHCP UDP/67, HTTP API, metrics) using the capabilities granted
+# below.
+
+[Unit]
+Description=gdhcp - High-Availability DHCP Server with IPAM
+Documentation=https://github.com/shamalawy/gdhcp
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Soft dependency only: postgresql.service is typically on a different host
+# in production HA setups, so we do not require it — gdhcp retries its DB
+# connection on startup and reports SERVICE_UNAVAILABLE via /api/v1/health
+# rather than failing to start.
+
+[Service]
+Type=simple
+User=gdhcp
+Group=gdhcp
+EnvironmentFile=-/etc/gdhcp/gdhcp.env
+ExecStart=/usr/local/bin/gdhcp serve --config-file /etc/gdhcp/config.yaml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Capabilities: CAP_NET_BIND_SERVICE to bind UDP/67 as non-root,
+# CAP_NET_ADMIN to assign/remove the HA virtual IP via netlink, CAP_NET_RAW
+# to send the gratuitous ARP that announces a VIP move (docs/design/ha-cluster.md).
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+# Security hardening. NoNewPrivileges is deliberately left OFF: with it on,
+# the ambient capability set above is dropped across the exec of the gdhcp
+# binary and DHCP/VIP operations fail at runtime with EPERM. Everything else
+# below still meaningfully reduces the attack surface for a process that
+# does not need it.
+NoNewPrivileges=false
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/etc/gdhcp /var/lib/gdhcp /var/log/gdhcp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gdhcp
+
+[Install]
+WantedBy=multi-user.target

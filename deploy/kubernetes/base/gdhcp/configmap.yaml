@@ -1,0 +1,61 @@
+# Mounted at /etc/gdhcp/config.yaml. Values referencing the database use the
+# gdhcp-db-credentials Secret via env (GDHCP_DATABASE_DSN in the DaemonSet
+# spec) rather than being baked in here, since Secret refs can't be
+# interpolated into a ConfigMap. server.jwt_secret is likewise left empty
+# here on purpose — set GDHCP_SERVER_JWT_SECRET from a Secret in any
+# multi-replica overlay, or every pod restart invalidates sessions
+# differently per pod (amendment A11).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gdhcp-config
+data:
+  config.yaml: |
+    server:
+      api_addr: "0.0.0.0:8080"
+      api_tls_enabled: false
+      jwt_secret: ""
+
+    database:
+      max_open_conns: 25
+      max_idle_conns: 5
+      conn_max_lifetime: "5m"
+      lease_retention_days: 90
+      option_cache_ttl: "60s"
+
+    dhcp:
+      # DHCP-in-Kubernetes caveats: see docs/deploy/kubernetes.md. Interfaces
+      # are host interface names — they only make sense combined with
+      # hostNetwork: true (set on the DaemonSet) and a node that actually
+      # has L2 adjacency to DHCP clients. Adjust per node/overlay; an empty
+      # list here would make every gdhcp pod API/UI-only.
+      interfaces:
+        - name: "eth0"
+          vrf_id: "default"
+      default_lease_time: 86400
+      default_renewal_time: 43200
+      default_rebind_time: 75600
+
+    ha:
+      enabled: true
+      cluster_id: "k8s-cluster"
+      # server_id/server_name/node_id are overridden per pod via env
+      # (GDHCP_HA_SERVER_ID etc., sourced from spec.nodeName) so every
+      # replica of this DaemonSet doesn't register as the same server.
+      vip_address: "10.0.0.10/24"
+      vip_interface: "eth0"
+      heartbeat_interval_ms: 1000
+      heartbeat_ttl_ms: 3000
+      election_interval_ms: 2000
+      config_check_interval_ms: 5000
+      config_listen_enabled: true
+
+    logging:
+      level: "info"
+      format: "json"
+      output: "stdout"
+
+    metrics:
+      enabled: true
+      listen_addr: "0.0.0.0:9090"
+      path: "/metrics"

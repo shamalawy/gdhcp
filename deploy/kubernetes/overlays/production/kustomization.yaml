@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: gdhcp
+
+resources:
+  - ../../base
+
+commonLabels:
+  app.kubernetes.io/environment: production
+
+images:
+  - name: gdhcp
+    newTag: v1.0.0   # pin to a real release tag before applying
+
+patches:
+  - path: daemonset-resources.yaml
+    target:
+      kind: DaemonSet
+      name: gdhcp
+  - path: postgres-storage.yaml
+    target:
+      kind: StatefulSet
+      name: gdhcp-postgres
+
+# Real credentials only. Create .env.secret locally (gitignored) with:
+#   username=gdhcp
+#   password=<strong random value>
+#   database=gdhcp
+#   dsn=postgres://gdhcp:<same password>@gdhcp-postgres:5432/gdhcp?sslmode=disable
+# or point `dsn` at an external managed Postgres instead of gdhcp-postgres
+# and drop the postgres/ resources from base if you do (see
+# docs/deploy/kubernetes.md).
+secretGenerator:
+  - name: gdhcp-db-credentials
+    envs:
+      - .env.secret
+    behavior: replace
+  - name: gdhcp-server-credentials
+    envs:
+      - .jwt.secret
+    behavior: replace

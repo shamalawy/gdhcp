@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gdhcp-postgres
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd   # match your cluster's storage class
+        resources:
+          requests:
+            storage: 50Gi

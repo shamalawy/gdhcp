@@ -1,0 +1,139 @@
+# gdhcp runs as a DaemonSet, not a Deployment. DHCP relies on receiving
+# broadcast packets on the node's real network interfaces, which only pods
+# with hostNetwork: true can do (no CNI forwards L2 broadcast into pod
+# network namespaces) — so "how many replicas" isn't a scaling knob, it's
+# "which nodes have a wire to the DHCP-serving segment", i.e. exactly the
+# nodes labeled gdhcp.io/dhcp-node=true. A Deployment with N replicas would
+# either colocate multiple pods pointlessly on one node or need per-pod node
+# affinity anyway — DaemonSet expresses "one per matching node" directly and
+# is what keeps a node's local gdhcp instance answering DISCOVER/REQUEST
+# even if the API server or other nodes are unreachable.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gdhcp
+  labels:
+    app.kubernetes.io/component: server
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: server
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      # hostNetwork: DHCP broadcast (UDP/67) does not cross the CNI bridge;
+      # the pod must share the node's network namespace to see it at all.
+      # This also means the pod can reach every interface and service on
+      # the node — acceptable for this trusted infrastructure workload, not
+      # something to also grant untrusted pods. See
+      # docs/deploy/kubernetes.md for the full caveat writeup, including
+      # why a floating VIP still needs L2 adjacency this cluster's CNI does
+      # not provide on its own (keepalived per node, or external LB, are
+      # the two supported paths).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Only nodes with a real link to the DHCP-serving network segment
+      # should run this pod:
+      #   kubectl label node <node> gdhcp.io/dhcp-node=true
+      nodeSelector:
+        gdhcp.io/dhcp-node: "true"
+      tolerations:
+        - key: gdhcp.io/dhcp-node
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: gdhcp
+          image: gdhcp:latest
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "--config-file", "/etc/gdhcp/config.yaml"]
+          ports:
+            - containerPort: 8080
+              hostPort: 8080
+              name: http
+              protocol: TCP
+            - containerPort: 67
+              hostPort: 67
+              name: dhcp
+              protocol: UDP
+            - containerPort: 9090
+              hostPort: 9090
+              name: metrics
+              protocol: TCP
+          env:
+            - name: GDHCP_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: gdhcp-db-credentials
+                  key: dsn
+            - name: GDHCP_SERVER_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gdhcp-server-credentials
+                  key: jwt_secret
+            - name: GDHCP_HA_SERVER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GDHCP_HA_SERVER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gdhcp
+              readOnly: true
+            - name: var-lib-gdhcp
+              mountPath: /var/lib/gdhcp
+          securityContext:
+            # allowPrivilegeEscalation + the capabilities below are what let
+            # an otherwise non-root process bind UDP/67 and manage the VIP
+            # (netlink + gratuitous ARP) — the container image itself
+            # already runs the gdhcp user (see deploy/docker/Dockerfile);
+            # this grants the same three capabilities Kubernetes' own way.
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: true
+            capabilities:
+              add: ["NET_ADMIN", "NET_RAW", "NET_BIND_SERVICE"]
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+      volumes:
+        - name: config
+          configMap:
+            name: gdhcp-config
+        - name: var-lib-gdhcp
+          emptyDir: {}

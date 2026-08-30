@@ -1,0 +1,68 @@
+---
+# gdhcp example configuration. Copy to config.yaml and edit, or override any
+# value with a GDHCP_<SECTION>_<FIELD> environment variable (see
+# server/internal/config/loader.go) — handy for containers/Kubernetes where
+# secrets shouldn't live in a checked-in file.
+
+server:
+  api_addr: "0.0.0.0:8080"
+  api_tls_enabled: false
+  # api_tls_cert: "/etc/gdhcp/certs/server.crt"
+  # api_tls_key: "/etc/gdhcp/certs/server.key"
+
+  # Signs session JWTs. Leave empty for local dev: a random secret is
+  # generated at startup and sessions reset on restart. Set an explicit
+  # value (or GDHCP_SERVER_JWT_SECRET) for any multi-node deployment.
+  jwt_secret: ""
+
+  # Origins allowed to make credentialed cross-origin requests to the API
+  # (Access-Control-Allow-Origin/-Credentials). Leave empty in production:
+  # the SPA is served same-origin (amendment A4), so no cross-origin
+  # request needs to be allowed at all. Add your frontend dev server here
+  # for local development, e.g.:
+  # cors_allowed_origins: ["http://localhost:4200"]
+  cors_allowed_origins: []
+
+database:
+  dsn: "postgres://gdhcp:gdhcp@localhost:5432/gdhcp?sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "5m"
+  lease_retention_days: 90
+  option_cache_ttl: "60s"
+
+dhcp:
+  # An empty interfaces list is valid and means API/UI-only mode: no DHCP
+  # listeners are started. Useful for IPAM-only nodes and local dev.
+  interfaces: []
+  # interfaces:
+  #   - name: "eth0"
+  #     vrf_id: "default"
+  default_lease_time: 86400   # seconds (24h)
+  default_renewal_time: 43200 # T1: 50% of lease time
+  default_rebind_time: 75600  # T2: 87.5% of lease time
+
+ha:
+  # false = standalone single-server mode (still registers in the DB).
+  enabled: false
+  cluster_id: "prod-cluster"
+  server_id: "dhcp-01"     # Or env var GDHCP_HA_SERVER_ID
+  server_name: "dhcp-server-1"
+  node_id: 1                # Unique per cluster; lower node_id wins election
+  vip_address: "10.0.0.10/24"
+  vip_interface: "eth0"
+  heartbeat_interval_ms: 1000
+  heartbeat_ttl_ms: 3000     # Must be >= 2 * heartbeat_interval_ms
+  election_interval_ms: 2000 # Should be <= heartbeat_ttl_ms / 2
+  config_check_interval_ms: 5000
+  config_listen_enabled: true
+
+logging:
+  level: "info"   # debug, info, warn, error
+  format: "json"  # json or text
+  output: "stdout"
+
+metrics:
+  enabled: true
+  listen_addr: "0.0.0.0:9090"
+  path: "/metrics"

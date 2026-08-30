@@ -1,0 +1,29 @@
+# Keep the Docker build context small and avoid leaking local secrets/state
+# into images. Paths are relative to the repo root (the build context set in
+# docker-compose.yml is `../..`).
+
+.git
+.github
+
+# Local, uncommitted deployment config/secrets
+deploy/docker/config.yaml
+deploy/kubernetes/**/*.secret.yaml
+**/*.env
+!deploy/systemd/gdhcp.env
+
+# Build output / caches — rebuilt inside the image
+dist/
+web/dist/
+web/node_modules/
+web/.angular/
+coverage.out
+
+# Editor/OS cruft
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Docs aren't needed inside the image
+docs/
+*.md

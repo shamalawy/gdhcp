@@ -1,0 +1,27 @@
+# ClusterIP for the HTTP API and web UI only — DHCP itself is UDP/67 via
+# hostPort on the DaemonSet pods directly, not through this Service (a
+# Kubernetes Service load-balances across all matching pods, which is wrong
+# for DHCP: a client's DISCOVER must reach the specific node it broadcast
+# on, not an arbitrary gdhcp pod on a different node). Because the pods use
+# hostNetwork: true, each pod's "pod IP" is its node's IP, so this Service
+# transparently proxies to whichever node(s) are currently Ready — fine for
+# API/UI traffic, which doesn't care which node answers.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gdhcp-api
+  labels:
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
