@@ -171,7 +171,7 @@ export interface PrefixFormDialogData {
       .field-error {
         color: var(--status-error);
         font-size: 12px;
-        margin: -12px 0 12px;
+        margin: 0 0 12px;
       }
 
       .field-warning {
@@ -180,7 +180,7 @@ export interface PrefixFormDialogData {
         gap: 4px;
         color: var(--status-warn);
         font-size: 12px;
-        margin: -12px 0 12px;
+        margin: 0 0 12px;
       }
 
       .field-warning mat-icon {

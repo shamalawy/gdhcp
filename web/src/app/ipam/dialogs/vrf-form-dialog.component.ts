@@ -121,7 +121,7 @@ export interface VrfFormDialogData {
       .field-error {
         color: var(--status-error);
         font-size: 12px;
-        margin: -12px 0 12px;
+        margin: 0 0 12px;
       }
     `,
   ],

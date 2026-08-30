@@ -255,3 +255,22 @@ a {
   background: var(--status-error);
   color: #fff;
 }
+
+// ---------------------------------------------------------------------------
+// Form field subscripts (hints and errors)
+// ---------------------------------------------------------------------------
+// Every field runs with `subscriptSizing: 'dynamic'` (see app.config.ts), so a
+// hint that wraps to several lines grows the field instead of spilling over the
+// next input. Dynamic sizing drops Material's fixed 16px strip though, which
+// was also the only thing separating stacked fields — so put that gap back as a
+// minimum the subscript can grow past.
+.mat-mdc-form-field-subscript-wrapper {
+  min-height: 16px;
+}
+
+// Long words in a hint (a CIDR, an option name) must wrap rather than widen the
+// field and force the dialog to scroll sideways.
+.mat-mdc-form-field-hint,
+.mat-mdc-form-field-error {
+  overflow-wrap: anywhere;
+}
