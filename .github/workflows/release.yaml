@@ -71,8 +71,10 @@ jobs:
         # BUILD_DATE is stamped here rather than read from the event payload.
         env:
           VERSION: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
         run: |
+          # Short SHA to match what the Makefile stamps locally, so
+          # `gdhcp version` reads the same from a release build and a dev build.
+          export COMMIT="$(git rev-parse --short HEAD)"
           export BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           SKIP_WEB_BUILD=1 scripts/build/release.sh
       - uses: actions/upload-artifact@v7
