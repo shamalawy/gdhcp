@@ -992,6 +992,32 @@ func (m *Mock) GetReservation(ctx context.Context, id string) (*models.DHCPReser
 	return r, nil
 }
 
+// ReservationByBindingKey looks up a reservation by pool and binding key
+// (amendment A19: the handler needs to check if a client is already pinned).
+func (m *Mock) ReservationByBindingKey(ctx context.Context, poolID, bindingKey string) (*models.DHCPReservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.reservations {
+		if r.PoolID == poolID && r.BindingKey == bindingKey {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
+// ReservationByIP looks up a reservation by pool and reserved IP (amendment
+// A19: the handler needs to check if an address is already reserved).
+func (m *Mock) ReservationByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPReservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.reservations {
+		if r.PoolID == poolID && r.ReservedIP.Equal(ip) {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
 func (m *Mock) CreateReservation(ctx context.Context, r *models.DHCPReservation) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1009,11 +1035,19 @@ func (m *Mock) CreateReservation(ctx context.Context, r *models.DHCPReservation)
 	if !ipInRange(r.ReservedIP, pool.RangeStart, pool.RangeEnd) {
 		return fmt.Errorf("mock: create reservation: reserved_ip %s outside pool range: %w", r.ReservedIP, models.ErrInvalidInput)
 	}
+	// Check for duplicate binding key (UNIQUE (pool_id, binding_key), amendment A19).
 	for _, existing := range m.reservations {
 		if existing.PoolID == r.PoolID && existing.BindingKey == r.BindingKey {
-			return fmt.Errorf("mock: create reservation: binding key %q: %w", r.BindingKey, models.ErrConflict)
+			return fmt.Errorf("mock: create reservation: binding key %q: %w: %w", r.BindingKey, models.ErrReservationClientExists, models.ErrConflict)
 		}
 	}
+	// Check if the IP is already reserved for a different client (amendment A19).
+	for _, existing := range m.reservations {
+		if existing.PoolID == r.PoolID && existing.ReservedIP.Equal(r.ReservedIP) && existing.BindingKey != r.BindingKey {
+			return fmt.Errorf("mock: create reservation: ip %s: %w: %w", r.ReservedIP, models.ErrReservationIPTaken, models.ErrConflict)
+		}
+	}
+	// Check if the IP already has an active lease for a different client (amendment A19).
 	for _, l := range m.leases {
 		if l.PoolID != r.PoolID || l.BindingState != models.LeaseStateActive || !l.IPAddress.Equal(r.ReservedIP) {
 			continue
@@ -1031,7 +1065,7 @@ func (m *Mock) CreateReservation(ctx context.Context, r *models.DHCPReservation)
 			}
 		}
 		if !sameClient {
-			return fmt.Errorf("mock: create reservation: ip %s in pool %s already has an active lease for a different client: %w", r.ReservedIP, r.PoolID, models.ErrConflict)
+			return fmt.Errorf("mock: create reservation: ip %s: %w: %w", r.ReservedIP, models.ErrReservationIPLeased, models.ErrConflict)
 		}
 	}
 	if r.ID == "" {
@@ -1054,8 +1088,46 @@ func (m *Mock) UpdateReservation(ctx context.Context, r *models.DHCPReservation)
 	if !models.IsCanonicalBindingKey(r.BindingKey) {
 		return fmt.Errorf("mock: update reservation: non-canonical binding_key %q (must be 'type:value'): %w", r.BindingKey, models.ErrInvalidInput)
 	}
-	if _, ok := m.reservations[r.ID]; !ok {
+	existing, ok := m.reservations[r.ID]
+	if !ok {
 		return fmt.Errorf("mock: update reservation %s: %w", r.ID, models.ErrNotFound)
+	}
+	// If binding key changed, check for conflicts (but not against this row itself, amendment A19).
+	if existing.BindingKey != r.BindingKey {
+		for _, res := range m.reservations {
+			if res.ID != r.ID && res.PoolID == r.PoolID && res.BindingKey == r.BindingKey {
+				return fmt.Errorf("mock: update reservation: binding key %q: %w: %w", r.BindingKey, models.ErrReservationClientExists, models.ErrConflict)
+			}
+		}
+	}
+	// If reserved IP changed, check that no other client reserves it and no different
+	// client has an active lease on it (amendment A19).
+	if !existing.ReservedIP.Equal(r.ReservedIP) {
+		for _, res := range m.reservations {
+			if res.ID != r.ID && res.PoolID == r.PoolID && res.ReservedIP.Equal(r.ReservedIP) && res.BindingKey != r.BindingKey {
+				return fmt.Errorf("mock: update reservation: ip %s: %w: %w", r.ReservedIP, models.ErrReservationIPTaken, models.ErrConflict)
+			}
+		}
+		for _, l := range m.leases {
+			if l.PoolID != r.PoolID || l.BindingState != models.LeaseStateActive || !l.IPAddress.Equal(r.ReservedIP) {
+				continue
+			}
+			var macStr, clientIDStr string
+			if l.ClientMAC != nil {
+				macStr = l.ClientMAC.String()
+			}
+			clientIDStr = encodeClientID(l.ClientID)
+			sameClient := false
+			for _, key := range leaseIdentity(macStr, clientIDStr, l.ClientHostname).BindingKeys() {
+				if key == r.BindingKey {
+					sameClient = true
+					break
+				}
+			}
+			if !sameClient {
+				return fmt.Errorf("mock: update reservation: ip %s: %w: %w", r.ReservedIP, models.ErrReservationIPLeased, models.ErrConflict)
+			}
+		}
 	}
 	r.UpdatedAt = time.Now().UTC()
 	m.reservations[r.ID] = r
@@ -1087,6 +1159,79 @@ func (m *Mock) reservationForKeysLocked(poolID string, keys []string) *models.DH
 		}
 	}
 	return nil
+}
+
+// leaseReservationLocked finds the one reservation that concerns a lease,
+// following amendment A19's precedence: prefer a reservation matching both
+// the client and the address (enabled takes precedence), then one matching
+// only the client, then one sitting on the address (amendment A19).
+func (m *Mock) leaseReservationLocked(lease *models.DHCPLease) *models.LeaseReservation {
+	var macStr, clientIDStr string
+	if lease.ClientMAC != nil {
+		macStr = lease.ClientMAC.String()
+	}
+	clientIDStr = encodeClientID(lease.ClientID)
+	clientKeys := leaseIdentity(macStr, clientIDStr, lease.ClientHostname).BindingKeys()
+
+	// Try to find a matching client in enabled, then disabled.
+	for _, key := range clientKeys {
+		for _, r := range m.reservations {
+			if r.PoolID != lease.PoolID || r.BindingKey != key {
+				continue
+			}
+			if r.IsEnabled {
+				return &models.LeaseReservation{
+					ID:             r.ID,
+					ReservedIP:     r.ReservedIP,
+					BindingKey:     r.BindingKey,
+					BindingType:    r.BindingType,
+					IsEnabled:      r.IsEnabled,
+					MatchesClient:  true,
+					MatchesAddress: r.ReservedIP.Equal(lease.IPAddress),
+				}
+			}
+		}
+	}
+	// Second pass for disabled client matches.
+	for _, key := range clientKeys {
+		for _, r := range m.reservations {
+			if r.PoolID != lease.PoolID || r.BindingKey != key {
+				continue
+			}
+			return &models.LeaseReservation{
+				ID:             r.ID,
+				ReservedIP:     r.ReservedIP,
+				BindingKey:     r.BindingKey,
+				BindingType:    r.BindingType,
+				IsEnabled:      r.IsEnabled,
+				MatchesClient:  true,
+				MatchesAddress: r.ReservedIP.Equal(lease.IPAddress),
+			}
+		}
+	}
+	// Finally, check if this address is reserved for anyone (enabled preferred).
+	var candidateDisabled *models.LeaseReservation
+	for _, r := range m.reservations {
+		if r.PoolID != lease.PoolID || !r.ReservedIP.Equal(lease.IPAddress) {
+			continue
+		}
+		lr := &models.LeaseReservation{
+			ID:             r.ID,
+			ReservedIP:     r.ReservedIP,
+			BindingKey:     r.BindingKey,
+			BindingType:    r.BindingType,
+			IsEnabled:      r.IsEnabled,
+			MatchesClient:  false,
+			MatchesAddress: true,
+		}
+		if r.IsEnabled {
+			return lr
+		}
+		if candidateDisabled == nil {
+			candidateDisabled = lr
+		}
+	}
+	return candidateDisabled
 }
 
 func (m *Mock) mostRecentClientLeaseLocked(poolID, clientMAC, clientID string) *models.DHCPLease {
@@ -1275,6 +1420,9 @@ func (m *Mock) AbandonLease(ctx context.Context, leaseID string, clientMAC strin
 	return nil
 }
 
+// GetLeaseByIP is an allocation hot-path method (amendment A6), so it is not
+// annotated with ReservationState/Reservation per amendment A19; those leases
+// never reach JSON.
 func (m *Mock) GetLeaseByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPLease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1286,6 +1434,9 @@ func (m *Mock) GetLeaseByIP(ctx context.Context, poolID string, ip net.IP) (*mod
 	return nil, nil
 }
 
+// GetLeaseByClient is an allocation hot-path method (amendment A6), so it is
+// not annotated with ReservationState/Reservation per amendment A19; those
+// leases never reach JSON.
 func (m *Mock) GetLeaseByClient(ctx context.Context, ident models.ClientIdentity) (*models.DHCPLease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1320,6 +1471,11 @@ func (m *Mock) GetLeasesByPool(ctx context.Context, poolID string, state string,
 	items := m.leasesMatching(func(l *models.DHCPLease) bool {
 		return l.PoolID == poolID && (state == "" || string(l.BindingState) == state)
 	})
+	// Annotate with reservation state, per amendment A19.
+	for _, l := range items {
+		l.Reservation = m.leaseReservationLocked(l)
+		l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	}
 	total := int64(len(items))
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -1385,6 +1541,11 @@ func (m *Mock) ListLeases(ctx context.Context, params ListParams) (ListResult[*m
 		}
 		return search == "" || leaseMatchesSearch(l, search)
 	})
+	// Annotate with reservation state, per amendment A19.
+	for _, l := range items {
+		l.Reservation = m.leaseReservationLocked(l)
+		l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	}
 	limit, offset := normalizeListParams(params)
 	total := int64(len(items))
 	return ListResult[*models.DHCPLease]{Items: paginate(items, limit, offset), Total: total, Limit: limit, Offset: offset}, nil
@@ -1445,6 +1606,9 @@ func (m *Mock) GetLease(ctx context.Context, id string) (*models.DHCPLease, erro
 	if !ok {
 		return nil, fmt.Errorf("mock: get lease %s: %w", id, models.ErrNotFound)
 	}
+	// Annotate with reservation state, per amendment A19.
+	l.Reservation = m.leaseReservationLocked(l)
+	l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
 	return l, nil
 }
 
@@ -1452,9 +1616,21 @@ func (m *Mock) ListLeasesByPool(ctx context.Context, poolID string, params ListP
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := params.Filters["state"]
+	search := strings.ToLower(strings.TrimSpace(params.Search))
 	items := m.leasesMatching(func(l *models.DHCPLease) bool {
-		return l.PoolID == poolID && (state == "" || string(l.BindingState) == state)
+		if l.PoolID != poolID {
+			return false
+		}
+		if state != "" && string(l.BindingState) != state {
+			return false
+		}
+		return search == "" || leaseMatchesSearch(l, search)
 	})
+	// Annotate with reservation state, per amendment A19.
+	for _, l := range items {
+		l.Reservation = m.leaseReservationLocked(l)
+		l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	}
 	limit, offset := normalizeListParams(params)
 	total := int64(len(items))
 	return ListResult[*models.DHCPLease]{Items: paginate(items, limit, offset), Total: total, Limit: limit, Offset: offset}, nil
@@ -1471,6 +1647,11 @@ func (m *Mock) GetLeaseByIPGlobal(ctx context.Context, ip net.IP) (*models.DHCPL
 			}
 		}
 	}
+	if best != nil {
+		// Annotate with reservation state, per amendment A19.
+		best.Reservation = m.leaseReservationLocked(best)
+		best.ReservationState = models.ClassifyLeaseReservation(best.Reservation)
+	}
 	return best, nil
 }
 
@@ -1481,6 +1662,11 @@ func (m *Mock) ListLeasesByMAC(ctx context.Context, mac string) ([]*models.DHCPL
 		return nil, fmt.Errorf("mock: list leases by mac: invalid MAC %q: %w", mac, models.ErrInvalidInput)
 	}
 	items := m.leasesMatching(func(l *models.DHCPLease) bool { return macEquals(l.ClientMAC, mac) })
+	// Annotate with reservation state, per amendment A19.
+	for _, l := range items {
+		l.Reservation = m.leaseReservationLocked(l)
+		l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	}
 	sort.Slice(items, func(i, j int) bool { return items[i].UpdatedAt.After(items[j].UpdatedAt) })
 	return items, nil
 }
@@ -2971,23 +3157,30 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 		scope := scopeOf[lease.PoolID]
 		state := lease.BindingState
 		start, end := lease.LeaseStart, lease.LeaseEnd
+		// Annotate with reservation state (amendment A19): find the reservation
+		// that concerns this lease, applying the same precedence as the lease
+		// read path.
+		leaseRes := m.leaseReservationLocked(lease)
+		leaseState := models.ClassifyLeaseReservation(leaseRes)
 		all = append(all, &models.DHCPClient{
-			ID:             lease.ID,
-			Kind:           models.ClientKindLease,
-			IPAddress:      lease.IPAddress,
-			PoolID:         pool.ID,
-			PoolName:       pool.Name,
-			ScopeID:        scope.ID,
-			ScopeName:      scope.Name,
-			PrefixID:       scope.IPAMPrefixID,
-			ClientMAC:      lease.ClientMAC,
-			ClientID:       lease.ClientID,
-			ClientHostname: lease.ClientHostname,
-			BindingState:   &state,
-			LeaseStart:     &start,
-			LeaseEnd:       &end,
-			CreatedAt:      lease.CreatedAt,
-			UpdatedAt:      lease.UpdatedAt,
+			ID:               lease.ID,
+			Kind:             models.ClientKindLease,
+			IPAddress:        lease.IPAddress,
+			PoolID:           pool.ID,
+			PoolName:         pool.Name,
+			ScopeID:          scope.ID,
+			ScopeName:        scope.Name,
+			PrefixID:         scope.IPAMPrefixID,
+			ClientMAC:        lease.ClientMAC,
+			ClientID:         lease.ClientID,
+			ClientHostname:   lease.ClientHostname,
+			BindingState:     &state,
+			LeaseStart:       &start,
+			LeaseEnd:         &end,
+			ReservationState: leaseState,
+			Reservation:      leaseRes,
+			CreatedAt:        lease.CreatedAt,
+			UpdatedAt:        lease.UpdatedAt,
 		})
 	}
 	for _, res := range m.reservations {
@@ -2997,21 +3190,37 @@ func (m *Mock) ListClientsUnderPrefix(ctx context.Context, prefixID string, para
 		}
 		scope := scopeOf[res.PoolID]
 		key, bindingType, enabled := res.BindingKey, res.BindingType, res.IsEnabled
-		client := &models.DHCPClient{
+		// Annotate with reservation state (amendment A19): a reservation row
+		// describes itself, so Reservation is populated from itself with
+		// MatchesClient and MatchesAddress both true. ReservationState is
+		// LeasePinned (enabled) or LeasePinnedDisabled (disabled).
+		resState := models.LeaseReservation{
 			ID:             res.ID,
-			Kind:           models.ClientKindReservation,
-			IPAddress:      res.ReservedIP,
-			PoolID:         pool.ID,
-			PoolName:       pool.Name,
-			ScopeID:        scope.ID,
-			ScopeName:      scope.Name,
-			PrefixID:       scope.IPAMPrefixID,
-			ClientHostname: res.Hostname,
-			BindingKey:     &key,
-			BindingType:    &bindingType,
-			IsEnabled:      &enabled,
-			CreatedAt:      res.CreatedAt,
-			UpdatedAt:      res.UpdatedAt,
+			ReservedIP:     res.ReservedIP,
+			BindingKey:     res.BindingKey,
+			BindingType:    res.BindingType,
+			IsEnabled:      res.IsEnabled,
+			MatchesClient:  true,
+			MatchesAddress: true,
+		}
+		reservationState := models.ClassifyLeaseReservation(&resState)
+		client := &models.DHCPClient{
+			ID:               res.ID,
+			Kind:             models.ClientKindReservation,
+			IPAddress:        res.ReservedIP,
+			PoolID:           pool.ID,
+			PoolName:         pool.Name,
+			ScopeID:          scope.ID,
+			ScopeName:        scope.Name,
+			PrefixID:         scope.IPAMPrefixID,
+			ClientHostname:   res.Hostname,
+			BindingKey:       &key,
+			BindingType:      &bindingType,
+			IsEnabled:        &enabled,
+			ReservationState: reservationState,
+			Reservation:      &resState,
+			CreatedAt:        res.CreatedAt,
+			UpdatedAt:        res.UpdatedAt,
 		}
 		// A MAC-bound reservation identifies a hardware address just as a
 		// lease does; surface it in the same column so the UI can show one

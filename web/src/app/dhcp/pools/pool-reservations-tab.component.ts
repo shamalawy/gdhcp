@@ -49,7 +49,7 @@ function parseBindingKey(key: string): { type: BindingType; value: string } | nu
     }
 
     @if (!loading() && reservations().length === 0) {
-      <app-empty-state icon="bookmark" title="No reservations" message="Reserve an IP for a client that should always get the same address.">
+      <app-empty-state icon="push_pin" title="No reservations" message="Reserve an IP for a client that should always get the same address.">
         <button mat-stroked-button (click)="openCreate()">Add reservation</button>
       </app-empty-state>
     } @else if (reservations().length > 0) {
@@ -101,35 +101,10 @@ function parseBindingKey(key: string): { type: BindingType; value: string } | nu
       .header-row {
         margin-bottom: 12px;
       }
-      .table-wrap {
-        overflow-x: auto;
-      }
-      .gdhcp-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-      }
-      .gdhcp-table th {
-        text-align: left;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-color);
-        padding: 8px;
-      }
-      .gdhcp-table td {
-        padding: 8px;
-        border-bottom: 1px solid var(--divider-color);
-      }
       .binding-type {
         font-size: 12px;
         text-transform: capitalize;
         color: var(--text-secondary);
-      }
-      .actions {
-        text-align: right;
-        white-space: nowrap;
       }
     `,
   ],
@@ -220,6 +195,10 @@ export class PoolReservationsTabComponent {
   }
 
   toggleEnabled(res: DHCPReservation, enabled: boolean): void {
+    // Omit hostname and description: the server treats absent keys as "leave alone",
+    // so this minimal request preserves those fields (amendment A19). Do not expand
+    // this to { is_enabled, hostname, description } — that would wipe them on a
+    // toggle-only update.
     this.api.updateReservation(res.id, { is_enabled: enabled }).subscribe({
       next: () => this.load(),
       error: (err) => this.notify.error(err, 'Could not update reservation.'),

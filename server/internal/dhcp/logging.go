@@ -10,27 +10,27 @@ import (
 // field set the task and docs/design/dhcp-engine.md specify so the UI's
 // error/audit views can filter and render them.
 type DHCPTransaction struct {
-	Timestamp     time.Time
-	XID           string
-	ClientMAC     string
-	ClientID      string
+	Timestamp      time.Time
+	XID            string
+	ClientMAC      string
+	ClientID       string
 	ClientHostname string
-	Interface     string
-	MsgType       string
-	ScopeID       string
-	PoolID        string
-	VRFID         string
-	AllocatedIP   string
-	LeaseDuration int
-	RelayAgent    string // giaddr, "" if not relayed
-	CircuitID     string // Option 82 sub-option 1, hex-encoded
-	RemoteID      string // Option 82 sub-option 2, hex-encoded
-	VendorClass   string // Option 60, hex-encoded
-	UserClass     string // Option 77, hex-encoded
-	ServerID      string
-	Result        string // "OK", "NAK", "ERROR"
-	Reason        string
-	DurationMS    int64
+	Interface      string
+	MsgType        string
+	ScopeID        string
+	PoolID         string
+	VRFID          string
+	AllocatedIP    string
+	LeaseDuration  int
+	RelayAgent     string // giaddr, "" if not relayed
+	CircuitID      string // Option 82 sub-option 1, hex-encoded
+	RemoteID       string // Option 82 sub-option 2, hex-encoded
+	VendorClass    string // Option 60, hex-encoded
+	UserClass      string // Option 77, hex-encoded
+	ServerID       string
+	Result         string // "OK", "NAK", "ERROR"
+	Reason         string
+	DurationMS     int64
 }
 
 // logTransaction emits one structured slog line per completed transaction.

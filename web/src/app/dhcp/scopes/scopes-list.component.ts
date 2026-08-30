@@ -145,28 +145,6 @@ interface ScopeRow {
       .filters mat-form-field {
         flex: 1;
       }
-      .table-wrap {
-        overflow-x: auto;
-      }
-      .gdhcp-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-      }
-      .gdhcp-table th {
-        text-align: left;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-color);
-        padding: 8px;
-      }
-      .gdhcp-table td {
-        padding: 8px;
-        border-bottom: 1px solid var(--divider-color);
-        vertical-align: middle;
-      }
       tr.clickable {
         cursor: pointer;
       }

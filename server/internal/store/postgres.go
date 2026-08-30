@@ -191,6 +191,15 @@ const (
 // models sentinel errors the API layer maps to HTTP status codes
 // (docs/CONTRACTS.md Part 6). op names the operation for the wrapped
 // message (e.g. "create vrf"); entity names the entity for context.
+// Amendment A19: for unique/exclusion violations, use pgErr.ConstraintName
+// instead of pgErr.Message. The httpx.RespondError handler sends err.Error()
+// straight to the client for non-500 errors, so anything in this string is
+// user-visible; pgErr.Message contains raw SQL constraint names like
+// "dhcp_reservations_pool_id_binding_key_key", which are implementation
+// details, not actionable to an operator. Keep the detail in the wrapped
+// error's context (server logs) by including pgErr.ConstraintName and
+// pgErr.Message in the fmt.Errorf call, so they reach the log even if the API
+// response does not.
 func mapWriteError(err error, op string) error {
 	if err == nil {
 		return nil
@@ -199,7 +208,7 @@ func mapWriteError(err error, op string) error {
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case sqlStateUniqueViolation, sqlStateExclusionViolation:
-			return fmt.Errorf("store: %s: %s: %w", op, pgErr.Message, models.ErrConflict)
+			return fmt.Errorf("store: %s: constraint %s (%s): %w", op, pgErr.ConstraintName, pgErr.Message, models.ErrConflict)
 		case sqlStateForeignKeyViolation, sqlStateNotNullViolation, sqlStateCheckViolation:
 			return fmt.Errorf("store: %s: %s: %w", op, pgErr.Message, models.ErrInvalidInput)
 		}

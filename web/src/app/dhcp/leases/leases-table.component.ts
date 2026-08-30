@@ -29,6 +29,7 @@ import { ApiService } from '../../shared/api.service';
 import { SseService } from '../../shared/sse.service';
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
+import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { DHCPLease, DHCPPool, DHCPScope, LeaseAction, LeaseBindingState } from '../../shared/models';
 import { clientIdToHex } from '../shared/ip-utils';
 import { NotifyService } from '../shared/notify.service';
@@ -90,6 +91,8 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
     FormsModule,
     RouterLink,
     EmptyStateComponent,
+    PinChipComponent,
+    PinButtonComponent,
     MatButtonModule,
     MatCheckboxModule,
     MatFormFieldModule,
@@ -228,7 +231,8 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
               }
               <th>State</th>
               <th>Expires in</th>
-              <th></th>
+              <th>Pinned</th>
+              <th class="actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -251,19 +255,20 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
                   <td>{{ poolLabel(lease.pool_id) }}</td>
                 }
                 <td>
-                  <span class="chip" [class]="'state-' + lease.binding_state">{{ lease.binding_state }}</span>
+                  <span class="gdhcp-state-chip" [class]="'state-' + lease.binding_state">{{ lease.binding_state }}</span>
                 </td>
                 <td>{{ lease.binding_state === 'active' ? expiresIn(lease) : '—' }}</td>
+                <td>
+                  <app-pin-chip [state]="lease.reservation_state" [reservation]="lease.reservation" />
+                </td>
                 <td class="actions">
-                  <button
-                    mat-icon-button
-                    (click)="pinLease(lease)"
+                  <app-pin-button
+                    [state]="lease.reservation_state"
+                    [reservation]="lease.reservation"
                     [disabled]="busy()"
-                    matTooltip="Pin this address to the client as a reservation"
-                    [attr.aria-label]="'Pin ' + lease.ip_address"
-                  >
-                    <mat-icon>push_pin</mat-icon>
-                  </button>
+                    [label]="lease.ip_address"
+                    (toggle)="togglePin(lease)"
+                  />
                   <button
                     mat-icon-button
                     [matMenuTriggerFor]="rowMenu"
@@ -277,10 +282,6 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
                       <mat-icon>open_in_new</mat-icon>
                       <span>Open lease</span>
                     </a>
-                    <button mat-menu-item (click)="pinLease(lease)">
-                      <mat-icon>push_pin</mat-icon>
-                      <span>Pin as reservation</span>
-                    </button>
                     <button mat-menu-item (click)="runAction('renew', lease)">
                       <mat-icon>autorenew</mat-icon>
                       <span>Force renew</span>
@@ -379,32 +380,6 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
         overflow-x: auto;
       }
 
-      .gdhcp-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-      }
-
-      .gdhcp-table th {
-        text-align: left;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-color);
-        padding: 8px;
-        white-space: nowrap;
-      }
-
-      .gdhcp-table td {
-        padding: 6px 8px;
-        border-bottom: 1px solid var(--divider-color);
-      }
-
-      .gdhcp-table tr.selected td {
-        background: var(--bg-highlight);
-      }
-
       .checkbox-cell {
         width: 40px;
         padding-right: 0;
@@ -419,33 +394,7 @@ function formatExpiresIn(leaseEnd: string, now: number): string {
         white-space: nowrap;
       }
 
-      .chip {
-        display: inline-block;
-        font-size: 11px;
-        padding: 1px 8px;
-        border-radius: 10px;
-        text-transform: capitalize;
-      }
-
-      .chip.state-active {
-        background: var(--util-ok);
-        color: #fff;
-      }
-
-      .chip.state-expired {
-        background: var(--util-track);
-        color: var(--text-secondary);
-      }
-
-      .chip.state-released {
-        background: var(--bg-highlight);
-        color: var(--primary-color);
-      }
-
-      .chip.state-abandoned {
-        background: var(--status-error);
-        color: #fff;
-      }
+      /* gdhcp-mono and chip are global utility classes defined in styles.scss. */
 
       .actions {
         text-align: right;
@@ -706,6 +655,89 @@ export class LeasesTableComponent {
 
   // -- Actions ---------------------------------------------------------
 
+  /** Real toggle over lease.reservation_state. amendment A19: the pin button
+   * now reads the lease's actual reservation state instead of always attempting
+   * to create a new one, so pinning a client that is already pinned to this
+   * address no longer produces a UNIQUE constraint error. */
+  togglePin(lease: DHCPLease): void {
+    const state = lease.reservation_state;
+
+    if (state === 'address_reserved') {
+      // Button is already disabled by PinButtonComponent; return defensively.
+      return;
+    }
+
+    if (state === 'not_pinned') {
+      // No reservation exists; show the form and POST a new one.
+      this.pinLease(lease);
+      return;
+    }
+
+    if (state === 'pinned' || state === 'pinned_disabled') {
+      // Delete the existing reservation.
+      // A disabled reservation is invisible to allocation (both
+      // reservationForKeys and scanCandidateIPs filter on is_enabled), so say
+      // plainly that removing it changes nothing about who gets the address.
+      const message =
+        state === 'pinned_disabled'
+          ? `The reservation binding this client to ${lease.ip_address} is disabled, so the DHCP engine already ignores it. ` +
+            `Removing it changes nothing about who gets this address.`
+          : `${lease.ip_address} goes back to being handed out dynamically, so this client may be given a different ` +
+            `address the next time it asks.`;
+      this.confirm
+        .confirm({ title: `Unpin ${lease.ip_address}?`, message, confirmText: 'Unpin' })
+        .subscribe((ok) => {
+        if (!ok || !lease.reservation) return;
+        this.busy.set(true);
+        this.api.deleteReservation(lease.reservation.id).subscribe({
+          next: () => {
+            this.busy.set(false);
+            this.notify.success(`${lease.ip_address} unpinned.`);
+            this.load();
+          },
+          error: (err) => {
+            this.busy.set(false);
+            this.notify.error(err, 'Could not remove the reservation.');
+          },
+        });
+      });
+      return;
+    }
+
+    if (state === 'pinned_elsewhere') {
+      // Client is pinned to a different address; move it.
+      // The case that used to fail on UNIQUE (pool_id, binding_key): a client
+      // gets one reservation per pool, so the existing one moves rather than a
+      // second one being created.
+      const currentIP = lease.reservation?.reserved_ip ?? 'another address';
+      this.confirm
+        .confirm({
+          title: `Move the pin to ${lease.ip_address}?`,
+          message:
+            `This client is already reserved on ${currentIP}. A client can hold only one reservation per pool, ` +
+            `so that reservation moves here instead of a second one being created — ${currentIP} returns to the ` +
+            `dynamic range.`,
+          confirmText: 'Move pin',
+        })
+        .subscribe((ok) => {
+        if (!ok || !lease.reservation) return;
+        this.busy.set(true);
+        this.api.updateReservation(lease.reservation.id, { reserved_ip: lease.ip_address }).subscribe({
+          next: () => {
+            this.busy.set(false);
+            this.notify.success(`Pin moved to ${lease.ip_address}.`);
+            this.load();
+          },
+          error: (err) => {
+            this.busy.set(false);
+            this.notify.error(err, 'Could not move the reservation.');
+          },
+        });
+      });
+      return;
+    }
+  }
+
   /** Turn a lease into a reservation, prefilled from the client currently
    * holding the address. */
   pinLease(lease: DHCPLease): void {
@@ -737,9 +769,11 @@ export class LeasesTableComponent {
       });
   }
 
-  /** Bulk pin: one reservation per selected lease, created directly from
-   * what the client already holds. The per-lease dialog would mean N
-   * dialogs, so this confirms once and reports the tally. */
+  /** Bulk pin: create a reservation for each selected lease, binding its
+   * current address to the client holding it. Skips leases that are already
+   * pinned (to any address) or whose address is reserved for another client.
+   * The per-lease dialog would mean N dialogs, so this confirms once and
+   * reports the tally. Amendment A19. */
   pinSelected(): void {
     const selected = this.selectedLeases();
     if (selected.length === 0) return;
@@ -748,8 +782,8 @@ export class LeasesTableComponent {
       .confirm({
         title: `Pin ${selected.length} lease${selected.length === 1 ? '' : 's'}?`,
         message:
-          `A reservation will be created for each selected lease, binding its current address to the ` +
-          `client holding it. Leases with no MAC and no client ID are skipped.`,
+          `A reservation will be created for each selected unpinned lease, binding its current address to the ` +
+          `client holding it. Leases with no MAC and no client ID, or that are already pinned, are skipped.`,
         confirmText: 'Pin',
       })
       .subscribe((ok) => {
@@ -759,10 +793,28 @@ export class LeasesTableComponent {
   }
 
   private pinAll(leases: DHCPLease[]): void {
-    const pinnable = leases.filter((l) => l.client_mac || l.client_id);
-    const skipped = leases.length - pinnable.length;
+    // Filter step 1: leases that identify a client (have MAC or client ID).
+    const withClient = leases.filter((l) => l.client_mac || l.client_id);
+    const noClient = leases.length - withClient.length;
+
+    // Filter step 2: leases that are not already pinned or blocked.
+    // Skip 'pinned', 'pinned_disabled', 'pinned_elsewhere', 'address_reserved';
+    // only 'not_pinned' can be pinned again. Amendment A19.
+    const pinnable = withClient.filter((l) => l.reservation_state === 'not_pinned');
+    const alreadyPinned = withClient.length - pinnable.length;
+
     if (pinnable.length === 0) {
-      this.notify.error(null, 'None of the selected leases identify a client to pin to.');
+      if (noClient > 0 && alreadyPinned > 0) {
+        this.notify.error(
+          null,
+          `None of the selected leases can be pinned: ${noClient} have no client identity, ` +
+            `and ${alreadyPinned} are already pinned or reserved.`,
+        );
+      } else if (noClient > 0) {
+        this.notify.error(null, 'None of the selected leases identify a client to pin to.');
+      } else {
+        this.notify.error(null, 'All selected leases are already pinned or reserved.');
+      }
       return;
     }
 
@@ -790,7 +842,7 @@ export class LeasesTableComponent {
         this.busy.set(false);
         const ok = results.filter(Boolean).length;
         const failed = results.length - ok;
-        this.reportOutcome('pinned', ok, failed, skipped);
+        this.reportOutcome('pinned', ok, failed, noClient + alreadyPinned);
         this.clearSelection();
         this.load();
       },

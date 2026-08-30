@@ -12,6 +12,7 @@ import { ApiService } from '../../shared/api.service';
 import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
+import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { DHCPLease, DHCPPool, DHCPScope, LeaseAction } from '../../shared/models';
 import { clientIdToHex } from '../shared/ip-utils';
 import { NotifyService } from '../shared/notify.service';
@@ -35,6 +36,8 @@ import {
     RouterLink,
     EmptyStateComponent,
     PageHeaderComponent,
+    PinChipComponent,
+    PinButtonComponent,
     MatButtonModule,
     MatIconModule,
     MatMenuModule,
@@ -60,10 +63,13 @@ import {
         [title]="l.ip_address"
         [breadcrumbs]="[{ label: 'DHCP', link: '/dhcp' }, { label: 'Leases', link: '/dhcp/leases' }, { label: l.ip_address }]"
       >
-        <button mat-stroked-button (click)="pin(l)" [disabled]="busy()">
-          <mat-icon>push_pin</mat-icon>
-          Pin as reservation
-        </button>
+        <app-pin-button
+          [state]="l.reservation_state"
+          [reservation]="l.reservation"
+          [disabled]="busy()"
+          [label]="l.ip_address"
+          (toggle)="togglePin(l)"
+        />
         <button mat-icon-button [matMenuTriggerFor]="menu" [disabled]="busy()" aria-label="Lease actions">
           <mat-icon>more_vert</mat-icon>
         </button>
@@ -90,7 +96,17 @@ import {
       <div class="gdhcp-card">
         <dl class="facts">
           <dt>State</dt>
-          <dd><span class="chip" [class]="'state-' + l.binding_state">{{ l.binding_state }}</span></dd>
+          <dd><span class="gdhcp-state-chip" [class]="'state-' + l.binding_state">{{ l.binding_state }}</span></dd>
+
+          <dt>Reservation</dt>
+          <dd>
+            <app-pin-chip [state]="l.reservation_state" [reservation]="l.reservation" />
+            @if (l.reservation_state === 'pinned') {
+              <a [routerLink]="['/dhcp/pools', l.pool_id]" [queryParams]="{ tab: 'reservations' }" class="reservation-link">
+                View in pool
+              </a>
+            }
+          </dd>
 
           <dt>IP address</dt>
           <dd class="gdhcp-mono">{{ l.ip_address }}</dd>
@@ -174,32 +190,12 @@ import {
         margin-left: 8px;
       }
 
-      .chip {
+      /* gdhcp-state-chip is a global utility class defined in styles.scss. */
+
+      .reservation-link {
         display: inline-block;
-        font-size: 11px;
-        padding: 1px 8px;
-        border-radius: 10px;
-        text-transform: capitalize;
-      }
-
-      .chip.state-active {
-        background: var(--util-ok);
-        color: #fff;
-      }
-
-      .chip.state-expired {
-        background: var(--util-track);
-        color: var(--text-secondary);
-      }
-
-      .chip.state-released {
-        background: var(--bg-highlight);
-        color: var(--primary-color);
-      }
-
-      .chip.state-abandoned {
-        background: var(--status-error);
-        color: #fff;
+        margin-left: 12px;
+        font-size: 12px;
       }
     `,
   ],
@@ -272,6 +268,89 @@ export class LeaseDetailComponent {
         this.scope.set(null);
       },
     });
+  }
+
+  /** Real toggle over lease.reservation_state. Amendment A19: the pin button
+   * now reads the lease's actual reservation state instead of always attempting
+   * to create a new one, so pinning a client that is already pinned to this
+   * address no longer produces a UNIQUE constraint error. */
+  togglePin(lease: DHCPLease): void {
+    const state = lease.reservation_state;
+
+    if (state === 'address_reserved') {
+      // Button is already disabled by PinButtonComponent; return defensively.
+      return;
+    }
+
+    if (state === 'not_pinned') {
+      // No reservation exists; show the form and POST a new one.
+      this.pin(lease);
+      return;
+    }
+
+    if (state === 'pinned' || state === 'pinned_disabled') {
+      // Delete the existing reservation.
+      // A disabled reservation is invisible to allocation (both
+      // reservationForKeys and scanCandidateIPs filter on is_enabled), so say
+      // plainly that removing it changes nothing about who gets the address.
+      const message =
+        state === 'pinned_disabled'
+          ? `The reservation binding this client to ${lease.ip_address} is disabled, so the DHCP engine already ignores it. ` +
+            `Removing it changes nothing about who gets this address.`
+          : `${lease.ip_address} goes back to being handed out dynamically, so this client may be given a different ` +
+            `address the next time it asks.`;
+      this.confirm
+        .confirm({ title: `Unpin ${lease.ip_address}?`, message, confirmText: 'Unpin' })
+        .subscribe((ok) => {
+        if (!ok || !lease.reservation) return;
+        this.busy.set(true);
+        this.api.deleteReservation(lease.reservation.id).subscribe({
+          next: () => {
+            this.busy.set(false);
+            this.notify.success(`${lease.ip_address} unpinned.`);
+            this.load();
+          },
+          error: (err) => {
+            this.busy.set(false);
+            this.notify.error(err, 'Could not remove the reservation.');
+          },
+        });
+      });
+      return;
+    }
+
+    if (state === 'pinned_elsewhere') {
+      // Client is pinned to a different address; move it.
+      // The case that used to fail on UNIQUE (pool_id, binding_key): a client
+      // gets one reservation per pool, so the existing one moves rather than a
+      // second one being created.
+      const currentIP = lease.reservation?.reserved_ip ?? 'another address';
+      this.confirm
+        .confirm({
+          title: `Move the pin to ${lease.ip_address}?`,
+          message:
+            `This client is already reserved on ${currentIP}. A client can hold only one reservation per pool, ` +
+            `so that reservation moves here instead of a second one being created — ${currentIP} returns to the ` +
+            `dynamic range.`,
+          confirmText: 'Move pin',
+        })
+        .subscribe((ok) => {
+        if (!ok || !lease.reservation) return;
+        this.busy.set(true);
+        this.api.updateReservation(lease.reservation.id, { reserved_ip: lease.ip_address }).subscribe({
+          next: () => {
+            this.busy.set(false);
+            this.notify.success(`Pin moved to ${lease.ip_address}.`);
+            this.load();
+          },
+          error: (err) => {
+            this.busy.set(false);
+            this.notify.error(err, 'Could not move the reservation.');
+          },
+        });
+      });
+      return;
+    }
   }
 
   pin(lease: DHCPLease): void {

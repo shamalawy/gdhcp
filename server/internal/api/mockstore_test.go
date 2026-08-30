@@ -305,6 +305,17 @@ func (m *mockStore) ReservationForLease(ctx context.Context, poolID, bindingKey 
 func (m *mockStore) ReservationsForKeys(ctx context.Context, poolID string, keys []string) (*models.DHCPReservation, error) {
 	return nil, nil
 }
+
+// ReservationByBindingKey and ReservationByIP back amendment A19's
+// reservation-conflict guards. This bare double answers "no such reservation"
+// (nil, nil -- a miss, not an error); the handler tests that exercise the
+// conflicts use store.Mock, which implements them for real.
+func (m *mockStore) ReservationByBindingKey(ctx context.Context, poolID, bindingKey string) (*models.DHCPReservation, error) {
+	return nil, nil
+}
+func (m *mockStore) ReservationByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPReservation, error) {
+	return nil, nil
+}
 func (m *mockStore) ListClientsUnderPrefix(ctx context.Context, prefixID string, params store.ListParams) (store.ListResult[*models.DHCPClient], error) {
 	return store.ListResult[*models.DHCPClient]{}, nil
 }

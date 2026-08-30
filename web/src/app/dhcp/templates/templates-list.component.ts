@@ -67,36 +67,11 @@ import { TemplateFormDialogComponent, TemplateFormDialogData, TemplateFormResult
   `,
   styles: [
     `
-      .table-wrap {
-        overflow-x: auto;
-      }
-      .gdhcp-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-      }
-      .gdhcp-table th {
-        text-align: left;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-color);
-        padding: 8px;
-      }
-      .gdhcp-table td {
-        padding: 8px;
-        border-bottom: 1px solid var(--divider-color);
-      }
       tr.clickable {
         cursor: pointer;
       }
       tr.clickable:hover {
         background: var(--hover-bg);
-      }
-      .actions {
-        text-align: right;
-        white-space: nowrap;
       }
     `,
   ],

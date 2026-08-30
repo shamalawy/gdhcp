@@ -257,12 +257,6 @@ const SUBNET_SIZE_CHOICES = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
         }
       </div>
 
-      <h2 class="section-title">DHCP clients</h2>
-      <p class="section-subtitle">Leases and reservations in this prefix and its descendants.</p>
-      <div class="gdhcp-card">
-        <app-prefix-clients [prefixId]="prefix.id" />
-      </div>
-
       <h2 class="section-title">Children</h2>
       <p class="section-subtitle">Prefixes nested directly under {{ prefix.prefix }}.</p>
 
@@ -293,6 +287,12 @@ const SUBNET_SIZE_CHOICES = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
           aria-label="Child prefix pages"
         />
       }
+
+      <h2 class="section-title">DHCP clients</h2>
+      <p class="section-subtitle">Leases and reservations in this prefix and its descendants.</p>
+      <div class="gdhcp-card">
+        <app-prefix-clients [prefixId]="prefix.id" />
+      </div>
     } @else {
       <app-empty-state icon="error_outline" title="Prefix not found" message="It may have been deleted." />
     }

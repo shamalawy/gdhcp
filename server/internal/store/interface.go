@@ -481,15 +481,39 @@ type ReservationStore interface {
 	ListReservationsByPool(ctx context.Context, poolID string, params ListParams) (ListResult[*models.DHCPReservation], error)
 	GetReservation(ctx context.Context, id string) (*models.DHCPReservation, error)
 
-	// CreateReservation creates a reservation. Implementations must reject
-	// (models.ErrInvalidInput) a ReservedIP outside the pool's range,
-	// (models.ErrConflict) a duplicate binding key within the pool, and
-	// (models.ErrConflict) a ReservedIP that already has an active lease
-	// belonging to a different client (the allocator's reservation-match
-	// step always wins the allocation round, so an unguarded conflict here
-	// would starve that other client of any address).
+	// ReservationByBindingKey checks if a reservation exists for this binding
+	// key in pool. Returns nil, nil if no reservation found (not an error) — a
+	// nil result means "no such reservation" and allows the API handler to
+	// ask "is this client already pinned?" without treating absence as an error.
+	ReservationByBindingKey(ctx context.Context, poolID, bindingKey string) (*models.DHCPReservation, error)
+
+	// ReservationByIP checks if a reservation exists for this IP in pool.
+	// Returns nil, nil if no reservation found (not an error) — a nil result
+	// means "no such reservation" and allows the API handler to ask "is this
+	// address already reserved?" without treating absence as an error.
+	ReservationByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPReservation, error)
+
+	// CreateReservation creates a reservation. Implementations must reject:
+	// - (models.ErrInvalidInput) a ReservedIP outside the pool's range,
+	// - (models.ErrReservationClientExists) wrapped with models.ErrConflict when
+	//   a reservation for this binding_key already exists in the pool (duplicate
+	//   UNIQUE (pool_id, binding_key) constraint, per amendment A19),
+	// - (models.ErrReservationIPTaken) wrapped with models.ErrConflict when a
+	//   different client already reserves this IP in the pool (amendment A19),
+	// - (models.ErrReservationIPLeased) wrapped with models.ErrConflict when an
+	//   active lease for a different client already holds this IP (the
+	//   allocator's reservation-match step always wins the allocation round, so
+	//   an unguarded conflict here would starve that other client of any
+	//   address, per amendment A19).
 	CreateReservation(ctx context.Context, r *models.DHCPReservation) error
+
+	// UpdateReservation updates a reservation. Implementations must reject the
+	// same conflicts as CreateReservation except for the row being updated
+	// (checking a duplicate binding key or active lease against all other rows,
+	// not including this reservation itself). This guards the PUT handler's
+	// reserved_ip field reassignment (amendment A19).
 	UpdateReservation(ctx context.Context, r *models.DHCPReservation) error
+
 	DeleteReservation(ctx context.Context, id string) error
 }
 

@@ -552,7 +552,9 @@ func (p *Postgres) DeleteVRF(ctx context.Context, id string) error {
 // branch, which silently mis-types the column when that branch is also NULL.
 const clientSelectCols = `id, kind, ip_address, pool_id, pool_name, scope_id, scope_name, prefix_id,
 	client_mac, client_id, client_hostname, binding_state, lease_start, lease_end,
-	binding_key, binding_type, is_enabled, created_at, updated_at`
+	binding_key, binding_type, is_enabled, reservation_id, reservation_ip, reservation_binding_key,
+	reservation_binding_type, reservation_is_enabled, reservation_matches_client, reservation_matches_address,
+	created_at, updated_at`
 
 // clientsCTE walks the prefix tree down from $1 and unions the leases and
 // enabled reservations of every scope hanging off a prefix in that subtree.
@@ -583,11 +585,40 @@ const clientsCTE = `
 			NULL::text                     AS binding_key,
 			NULL::text                     AS binding_type,
 			NULL::boolean                  AS is_enabled,
+			res_info.id::text              AS reservation_id,
+			res_info.reserved_ip           AS reservation_ip,
+			res_info.binding_key::text     AS reservation_binding_key,
+			res_info.binding_type::text    AS reservation_binding_type,
+			res_info.is_enabled::boolean   AS reservation_is_enabled,
+			res_info.matches_client::boolean AS reservation_matches_client,
+			res_info.matches_address::boolean AS reservation_matches_address,
 			l.created_at                   AS created_at,
 			l.updated_at                   AS updated_at
 		FROM dhcp_leases l
 		JOIN dhcp_pools po ON po.id = l.pool_id
 		JOIN dhcp_scopes s ON s.id = po.scope_id
+		-- Amendment A19: join reservations for the same pool, selecting the best match
+		-- (both client and address, then client only, then enabled, then binding-key precedence).
+		-- The LEFT JOIN + LIMIT 1 cannot multiply rows, so the count query stays accurate.
+		LEFT JOIN LATERAL (
+			SELECT
+				r.id, r.reserved_ip, r.binding_key, r.binding_type, r.is_enabled,
+				(l.ip_address = r.reserved_ip)::boolean AS matches_address,
+				(r.binding_key = ANY(bk.keys))::boolean AS matches_client
+			FROM (SELECT lease_binding_keys(l.client_mac, l.client_id, l.client_hostname) AS keys) bk
+			CROSS JOIN dhcp_reservations r
+			WHERE r.pool_id = l.pool_id AND (
+				l.ip_address = r.reserved_ip OR
+				r.binding_key = ANY(bk.keys)
+			)
+			ORDER BY
+				(l.ip_address = r.reserved_ip AND r.binding_key = ANY(bk.keys))::boolean DESC,
+				(r.binding_key = ANY(bk.keys))::boolean DESC,
+				r.is_enabled DESC,
+				ARRAY_POSITION(bk.keys, r.binding_key) ASC,
+				r.created_at ASC
+			LIMIT 1
+		) res_info ON true
 		WHERE s.ipam_prefix_id IN (SELECT id FROM descendants)
 
 		UNION ALL
@@ -615,11 +646,22 @@ const clientsCTE = `
 			r.binding_key,
 			r.binding_type,
 			r.is_enabled,
+			r.id::text                     AS reservation_id,
+			r.reserved_ip                  AS reservation_ip,
+			r.binding_key::text            AS reservation_binding_key,
+			r.binding_type::text           AS reservation_binding_type,
+			r.is_enabled::boolean          AS reservation_is_enabled,
+			TRUE::boolean                  AS reservation_matches_client,
+			TRUE::boolean                  AS reservation_matches_address,
 			r.created_at,
 			r.updated_at
 		FROM dhcp_reservations r
 		JOIN dhcp_pools po ON po.id = r.pool_id
 		JOIN dhcp_scopes s ON s.id = po.scope_id
+		-- Only enabled reservations appear here; a disabled reservation is invisible to allocation
+		-- (it neither holds an address nor blocks anyone), so it does not show as a row in ListClientsUnderPrefix.
+		-- The lease branch can report pinned_disabled when a reservation matches a lease but is disabled;
+		-- ClassifyLeaseReservation handles that case.
 		WHERE s.ipam_prefix_id IN (SELECT id FROM descendants) AND r.is_enabled
 	)`
 
@@ -627,6 +669,13 @@ func scanDHCPClient(row pgx.Row) (*models.DHCPClient, error) {
 	var c models.DHCPClient
 	var clientMAC net.HardwareAddr
 	var clientID []byte
+	var resID *string
+	var resIP *net.IP
+	var resBindingKey *string
+	var resBindingType *string
+	var resIsEnabled *bool
+	var resMatchesClient *bool
+	var resMatchesAddress *bool
 	if err := row.Scan(
 		&c.ID,
 		&c.Kind,
@@ -645,6 +694,13 @@ func scanDHCPClient(row pgx.Row) (*models.DHCPClient, error) {
 		&c.BindingKey,
 		&c.BindingType,
 		&c.IsEnabled,
+		&resID,
+		&resIP,
+		&resBindingKey,
+		&resBindingType,
+		&resIsEnabled,
+		&resMatchesClient,
+		&resMatchesAddress,
 		&c.CreatedAt,
 		&c.UpdatedAt,
 	); err != nil {
@@ -655,6 +711,20 @@ func scanDHCPClient(row pgx.Row) (*models.DHCPClient, error) {
 		c.ClientMAC = &ha
 	}
 	c.ClientID = clientID
+	// Amendment A19: build LeaseReservation from the seven columns if present,
+	// and classify it to compute the reservation state.
+	if resID != nil {
+		c.Reservation = &models.LeaseReservation{
+			ID:             *resID,
+			ReservedIP:     *resIP,
+			BindingKey:     *resBindingKey,
+			BindingType:    models.BindingType(*resBindingType),
+			IsEnabled:      *resIsEnabled,
+			MatchesClient:  *resMatchesClient,
+			MatchesAddress: *resMatchesAddress,
+		}
+	}
+	c.ReservationState = models.ClassifyLeaseReservation(c.Reservation)
 	return &c, nil
 }
 
@@ -738,4 +808,3 @@ func (p *Postgres) ListClientsUnderPrefix(ctx context.Context, prefixID string, 
 
 	return ListResult[*models.DHCPClient]{Items: clients, Total: total, Limit: limit, Offset: offset}, nil
 }
-

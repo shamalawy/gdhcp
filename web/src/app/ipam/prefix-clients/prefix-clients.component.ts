@@ -16,7 +16,9 @@ import { debounceTime, distinctUntilChanged } from 'rxjs/operators';
 
 import { ApiService } from '../../shared/api.service';
 import { BindingType, DHCPClient, LeaseBindingState } from '../../shared/models';
+import { ConfirmDialogService } from '../../shared/components/confirm-dialog/confirm-dialog.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
+import { PinChipComponent, PinButtonComponent } from '../../shared/components/pin-indicator/pin-indicator.component';
 import { NotifyService } from '../../dhcp/shared/notify.service';
 import {
   ReservationFormDialogComponent,
@@ -82,6 +84,8 @@ function formatBindingType(type: BindingType): string {
     MatSelectModule,
     MatTooltipModule,
     EmptyStateComponent,
+    PinChipComponent,
+    PinButtonComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -110,7 +114,7 @@ function formatBindingType(type: BindingType): string {
         }
 
         <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
-          <mat-label>Search IP or MAC</mat-label>
+          <mat-label>Search IP, MAC or hostname</mat-label>
           <input matInput [(ngModel)]="searchText" (ngModelChange)="onSearchChange($event)" />
           @if (searchText) {
             <button mat-icon-button matSuffix (click)="clearSearch()">
@@ -140,7 +144,8 @@ function formatBindingType(type: BindingType): string {
               <th>State</th>
               <th>Expires in</th>
               <th>Scope</th>
-              <th></th>
+              <th>Pinned</th>
+              <th class="actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -157,7 +162,7 @@ function formatBindingType(type: BindingType): string {
                 <td>{{ client.client_hostname || '—' }}</td>
                 <td>
                   @if (client.binding_state) {
-                    <span class="chip" [class]="'state-' + client.binding_state">{{ client.binding_state }}</span>
+                    <span class="gdhcp-state-chip" [class]="'state-' + client.binding_state">{{ client.binding_state }}</span>
                   } @else {
                     <span class="gdhcp-muted">—</span>
                   }
@@ -172,18 +177,17 @@ function formatBindingType(type: BindingType): string {
                 <td>
                   <a [routerLink]="['/dhcp', 'scopes', client.scope_id]">{{ client.scope_name }}</a>
                 </td>
+                <td>
+                  <app-pin-chip [state]="client.reservation_state" [reservation]="client.reservation" />
+                </td>
                 <td class="actions" (click)="$event.stopPropagation()">
-                  @if (client.kind === 'lease') {
-                    <button
-                      mat-icon-button
-                      (click)="openReserve(client)"
-                      [attr.aria-label]="'Reserve ' + client.ip_address"
-                      matTooltip="Reserve this IP"
-                      matTooltipPosition="before"
-                    >
-                      <mat-icon>bookmark_add</mat-icon>
-                    </button>
-                  }
+                  <app-pin-button
+                    [state]="client.reservation_state"
+                    [reservation]="client.reservation"
+                    [disabled]="busy()"
+                    [label]="client.ip_address"
+                    (toggle)="togglePin(client)"
+                  />
                 </td>
               </tr>
             }
@@ -223,31 +227,6 @@ function formatBindingType(type: BindingType): string {
         min-width: 180px;
       }
 
-      .table-wrap {
-        overflow-x: auto;
-      }
-
-      .gdhcp-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-      }
-
-      .gdhcp-table th {
-        text-align: left;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-color);
-        padding: 8px;
-      }
-
-      .gdhcp-table td {
-        padding: 8px;
-        border-bottom: 1px solid var(--divider-color);
-      }
-
       .kind-chip {
         display: inline-block;
         font-size: 11px;
@@ -267,34 +246,6 @@ function formatBindingType(type: BindingType): string {
         color: var(--primary-color);
       }
 
-      .chip {
-        display: inline-block;
-        font-size: 11px;
-        padding: 1px 8px;
-        border-radius: 10px;
-        text-transform: capitalize;
-      }
-
-      .chip.state-active {
-        background: var(--util-ok);
-        color: #fff;
-      }
-
-      .chip.state-expired {
-        background: var(--util-track);
-        color: var(--text-secondary);
-      }
-
-      .chip.state-released {
-        background: var(--bg-highlight);
-        color: var(--primary-color);
-      }
-
-      .chip.state-abandoned {
-        background: var(--status-error);
-        color: #fff;
-      }
-
       .actions {
         text-align: right;
         white-space: nowrap;
@@ -306,6 +257,7 @@ export class PrefixClientsComponent {
   private readonly api = inject(ApiService);
   private readonly dialog = inject(MatDialog);
   private readonly notify = inject(NotifyService);
+  private readonly confirm = inject(ConfirmDialogService);
   private readonly destroyRef = inject(DestroyRef);
 
   readonly prefixId = input.required<string>();
@@ -313,6 +265,7 @@ export class PrefixClientsComponent {
   readonly pageSizeOptions = PAGE_SIZE_OPTIONS;
 
   readonly loading = signal(true);
+  readonly busy = signal(false);
   readonly clients = signal<DHCPClient[]>([]);
   readonly total = signal(0);
   readonly limit = signal(PAGE_SIZE_OPTIONS[1]);
@@ -445,5 +398,88 @@ export class PrefixClientsComponent {
           error: (err) => this.notify.error(err, 'Could not create reservation.'),
         });
       });
+  }
+
+  /** Amendment A19: toggle reservation state based on the current state.
+   * not_pinned: open dialog and POST a new reservation. pinned/pinned_disabled:
+   * confirm then delete. pinned_elsewhere: confirm then update with new IP.
+   * address_reserved: no-op (button disabled). */
+  togglePin(client: DHCPClient): void {
+    const state = client.reservation_state;
+
+    if (state === 'address_reserved') {
+      // Button is already disabled by PinButtonComponent; return defensively.
+      return;
+    }
+
+    if (state === 'not_pinned') {
+      // No reservation exists; show the form and POST a new one.
+      this.openReserve(client);
+      return;
+    }
+
+    if (state === 'pinned' || state === 'pinned_disabled') {
+      // Delete the existing reservation.
+      // A disabled reservation is invisible to allocation (both
+      // reservationForKeys and scanCandidateIPs filter on is_enabled), so say
+      // plainly that removing it changes nothing about who gets the address.
+      const message =
+        state === 'pinned_disabled'
+          ? `The reservation binding this client to ${client.ip_address} is disabled, so the DHCP engine already ignores it. ` +
+            `Removing it changes nothing about who gets this address.`
+          : `${client.ip_address} goes back to being handed out dynamically, so this client may be given a different ` +
+            `address the next time it asks.`;
+      this.confirm
+        .confirm({ title: `Unpin ${client.ip_address}?`, message, confirmText: 'Unpin' })
+        .subscribe((ok) => {
+        if (!ok || !client.reservation) return;
+        this.busy.set(true);
+        this.api.deleteReservation(client.reservation.id).subscribe({
+          next: () => {
+            this.busy.set(false);
+            this.notify.success(`${client.ip_address} unpinned.`);
+            this.load();
+          },
+          error: (err) => {
+            this.busy.set(false);
+            this.notify.error(err, 'Could not remove the reservation.');
+          },
+        });
+      });
+      return;
+    }
+
+    if (state === 'pinned_elsewhere') {
+      // Client is pinned to a different address; move it.
+      // The case that used to fail on UNIQUE (pool_id, binding_key): a client
+      // gets one reservation per pool, so the existing one moves rather than a
+      // second one being created.
+      const currentIP = client.reservation?.reserved_ip ?? 'another address';
+      this.confirm
+        .confirm({
+          title: `Move the pin to ${client.ip_address}?`,
+          message:
+            `This client is already reserved on ${currentIP}. A client can hold only one reservation per pool, ` +
+            `so that reservation moves here instead of a second one being created — ${currentIP} returns to the ` +
+            `dynamic range.`,
+          confirmText: 'Move pin',
+        })
+        .subscribe((ok) => {
+        if (!ok || !client.reservation) return;
+        this.busy.set(true);
+        this.api.updateReservation(client.reservation.id, { reserved_ip: client.ip_address }).subscribe({
+          next: () => {
+            this.busy.set(false);
+            this.notify.success(`Pin moved to ${client.ip_address}.`);
+            this.load();
+          },
+          error: (err) => {
+            this.busy.set(false);
+            this.notify.error(err, 'Could not move the reservation.');
+          },
+        });
+      });
+      return;
+    }
   }
 }

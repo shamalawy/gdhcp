@@ -15,6 +15,10 @@ import (
 )
 
 // List handles GET /api/v1/leases?scope_id&pool_id&state.
+// Amendment A19: models.DHCPLease.ReservationState and Reservation are
+// populated by the store's join with dhcp_reservations and are ready to
+// serialize; no handler-level work is needed to make them appear in the
+// JSON response.
 func List(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		params := httpx.ParseListParams(r, "scope_id", "pool_id", "state")
@@ -28,6 +32,10 @@ func List(st store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // Get handles GET /api/v1/leases/{lease_id}.
+// Amendment A19: models.DHCPLease.ReservationState and Reservation are
+// populated by the store's join with dhcp_reservations and are ready to
+// serialize; no handler-level work is needed to make them appear in the
+// JSON response.
 func Get(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		l, err := st.GetLease(r.Context(), mux.Vars(r)["lease_id"])
@@ -40,6 +48,10 @@ func Get(st store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // ListByPool handles GET /api/v1/pools/{pool_id}/leases?state.
+// Amendment A19: models.DHCPLease.ReservationState and Reservation are
+// populated by the store's join with dhcp_reservations and are ready to
+// serialize; no handler-level work is needed to make them appear in the
+// JSON response.
 func ListByPool(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		poolID := mux.Vars(r)["pool_id"]
@@ -54,6 +66,10 @@ func ListByPool(st store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // GetByIP handles GET /api/v1/leases/by-ip/{ip_address}.
+// Amendment A19: models.DHCPLease.ReservationState and Reservation are
+// populated by the store's join with dhcp_reservations and are ready to
+// serialize; no handler-level work is needed to make them appear in the
+// JSON response.
 func GetByIP(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip, err := httpx.ParseIP("ip_address", mux.Vars(r)["ip_address"])
@@ -71,6 +87,10 @@ func GetByIP(st store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // GetByMAC handles GET /api/v1/leases/by-mac/{mac_address}.
+// Amendment A19: models.DHCPLease.ReservationState and Reservation are
+// populated by the store's join with dhcp_reservations and are ready to
+// serialize; no handler-level work is needed to make them appear in the
+// JSON response.
 func GetByMAC(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mac, err := httpx.ParseMAC("mac_address", mux.Vars(r)["mac_address"])

@@ -52,3 +52,33 @@ var (
 	// Maps to HTTP 409 / CONFLICT.
 	ErrHasDependents = errors.New("entity has dependent records")
 )
+
+// Reservation conflicts, amendment A19. These are the three ways a
+// reservation can collide with one that already exists. Each is wrapped
+// alongside ErrConflict, so the generic 409 mapping still applies while the
+// reservations handler can recognise the specific case and answer with a
+// sentence an operator can act on.
+//
+// They exist because the generic path produced this, verbatim, in the UI's
+// error toast:
+//
+//	store: create reservation: duplicate key value violates unique
+//	constraint "dhcp_reservations_pool_id_binding_key_key": conflict
+//
+// which names a database constraint rather than the thing the operator did.
+var (
+	// ErrReservationClientExists indicates the client already holds a
+	// reservation in this pool. UNIQUE (pool_id, binding_key) permits one per
+	// client, so the existing reservation must be moved, not duplicated.
+	ErrReservationClientExists = errors.New("client already has a reservation in this pool")
+
+	// ErrReservationIPTaken indicates the address is already reserved for a
+	// different client in this pool. Two reservations on one address would
+	// leave whichever client asked second permanently unable to get it.
+	ErrReservationIPTaken = errors.New("address is already reserved for another client in this pool")
+
+	// ErrReservationIPLeased indicates the address currently has an active
+	// lease held by a different client. Reserving it would starve that client
+	// on every future request (amendment A6 step 1 wins unconditionally).
+	ErrReservationIPLeased = errors.New("address is actively leased to a different client")
+)

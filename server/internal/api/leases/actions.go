@@ -135,6 +135,10 @@ func Abandon(st store.Store, log *slog.Logger) http.HandlerFunc {
 }
 
 // Renew handles POST /api/v1/leases/{lease_id}/renew. The body is optional.
+// Amendment A19: models.DHCPLease.ReservationState and Reservation are
+// populated by the store's join with dhcp_reservations and are ready to
+// serialize; no handler-level work is needed to make them appear in the
+// JSON response.
 func Renew(st store.Store, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body renewRequest

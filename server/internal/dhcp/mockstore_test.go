@@ -31,11 +31,11 @@ type mockStore struct {
 	globalOptions  []*models.DHCPOption
 	leasesByPoolIP map[string]*models.DHCPLease // key "poolID|ip"
 
-	allocateResult           *models.DHCPLease
-	allocateErr              error
-	allocateLastIdent        models.ClientIdentity
-	allocateLastHostname     *string
-	renewCalled              bool
+	allocateResult       *models.DHCPLease
+	allocateErr          error
+	allocateLastIdent    models.ClientIdentity
+	allocateLastHostname *string
+	renewCalled          bool
 
 	servers              []*models.ClusterServer
 	clusterSizeCallCount int
@@ -127,6 +127,18 @@ func (m *mockStore) ReservationForLease(ctx context.Context, poolID string, bind
 }
 
 func (m *mockStore) ReservationsForKeys(ctx context.Context, poolID string, keys []string) (*models.DHCPReservation, error) {
+	return nil, nil
+}
+
+// ReservationByBindingKey and ReservationByIP back the reservation-conflict
+// guards added by amendment A19. The engine never calls them -- they exist on
+// the store interface for the API's write path -- so the stubs answer "no such
+// reservation" (nil, nil), which is the miss case, not an error.
+func (m *mockStore) ReservationByBindingKey(ctx context.Context, poolID, bindingKey string) (*models.DHCPReservation, error) {
+	return nil, nil
+}
+
+func (m *mockStore) ReservationByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPReservation, error) {
 	return nil, nil
 }
 

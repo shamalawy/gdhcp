@@ -407,3 +407,105 @@ The 'user' and 'server' exclusion from A15's admin-only gate stands unchanged.
 - The `gdhcp` wordmark moves from the toolbar to the top of the sidenav, above the nav it
   belongs to, and links to `/dashboard`. The global search trigger keeps the toolbar's
   leading position.
+
+## A19. Reservation visibility and the pin toggle
+Added after A18. The pin was write-only: the leases table offered a Pin action but no way to see
+whether an address was already pinned, so discovery required clicking and reading a Postgres constraint
+error. Six defects in the reservation system are fixed here, and visuals are made consistent.
+
+### A19.1 The write-only pin
+`UNIQUE (pool_id, binding_key)` in the schema is correct — one reservation per client per pool. The
+defect was that nothing in the read path exposed it. When an operator pinned a client that was already
+pinned to a different address, the API returned `duplicate key value violates unique constraint
+"dhcp_reservations_pool_id_binding_key_key"` — a constraint name, not a sentence. The leases read
+path now carries `reservation_state` and `reservation` fields, so the two web tables and the CLI
+all answer the same question: is this client pinned?
+
+### A19.2 Five reservation states
+A lease's `LeaseReservationState` names its relationship to reservations in its pool. Each affects
+DHCP allocation visibility and the client's lease stability differently:
+
+| State | Meaning | Allocation | Stability |
+| --- | --- | --- | --- |
+| `not_pinned` | No reservation for this client or address in this pool. Pinning is safe. | Free to allocate dynamic addresses. | Client holds address only while lease is active; renew affinity brings it back. |
+| `pinned` | Enabled reservation binds this exact client to this exact address. | Address is held and only offered to this client. | Client is guaranteed this address; address is unavailable to any other client. |
+| `pinned_disabled` | Reservation exists but is disabled (`is_enabled = false`). `reservationForKeys` and `scanCandidateIPs` both filter `AND is_enabled`, so disabled reservations are invisible to allocation. | Address is free; no DHCP client can claim it, not even the reserved one. | Disabled reservations hold neither addresses nor block anyone. Re-enabling one makes it visible again. |
+| `pinned_elsewhere` | This client is reserved, but to a **different** address. Moving the pin requires updating the existing reservation, not creating a new one. Creating a second would violate `UNIQUE (pool_id, binding_key)`. | Client receives whichever of {renew affinity, dynamic candidate} applies. Reserved address sits unclaimed. | Client keeps current address via renew affinity; migration to the reserved address requires DHCP forgetfulness or operator intervention. |
+| `address_reserved` | This address is reserved for a different client. Current lease holder keeps it until lapse. | Address is unavailable to other clients. | Current holder is not disturbed; when lease lapses, reserved client can claim it. |
+
+### A19.3 State derivation
+The state is derived on read from a LEFT JOIN LATERAL over `dhcp_reservations`, ordered by specificity
+(A19.2's table establishes precedence):
+
+1. Both binding_key and reserved_ip match (client pinned to address): `pinned` if enabled, `pinned_disabled` if not.
+2. Only binding_key matches (client reserved elsewhere): `pinned_elsewhere`.
+3. Only reserved_ip matches (address reserved for someone else): `address_reserved`.
+4. No match: `not_pinned`.
+
+The SQL function `lease_binding_keys(client_mac, client_id, client_hostname)` returns the lease's
+canonical candidate keys in `models.ClientIdentity.BindingKeys()` order — the single definition shared
+by Postgres and the mock (A17.1 corrected one such inconsistency already). The LATERAL orders by
+`array_position()` to preserve candidate precedence, ensuring the allocation algorithm's tie-breaking
+logic is visible in reads. Only the API-facing read paths (not the DHCP engine's hot-path allocation
+calls) populate `ReservationState`; the engine leaves it empty.
+
+`models.ClassifyLeaseReservation` is the sole definition called by both Postgres and mock; the two
+can never disagree about what "pinned" means.
+
+### A19.4 The pin is a toggle: pin / unpin / move
+`POST /leases/{lease_id}/pin` toggles: if the lease is not pinned, it creates a reservation; if
+pinned, it deletes it. Moving a reserved client to a different address requires updating the
+reservation, not adding a new one. This demanded one store signature change: `PUT /reservations/{id}`
+now accepts an optional `reserved_ip` field, so a reservation's address can be moved. An absent key
+now means "leave alone" — both the old and new updates (hostname/description and is_enabled) must be
+able to leave some fields untouched, else an enable/disable toggle (which sends `{is_enabled}` alone)
+will erase hostname and description.
+
+### A19.5 Two write-path defects fixed
+The store now rejects duplicate reservations on the same address in a pool. The state machine was
+silent: two clients could have reservations for the same IP, and whichever asked second would fail to
+allocate and get NAK'd. That was a starvation bug — the address would be held and unclaimed.
+`ErrReservationIPTaken`, wrapped alongside `ErrConflict` for a 409 response, stops this.
+
+A second defect: `PUT /reservations/{id}` unconditionally replaced `hostname` and `description`, so
+the Reservations tab's enable/disable slide-toggle (which sends only `{is_enabled}`) erased both
+fields. Now an absent key means "leave it as is", so partial updates are safe.
+
+### A19.6 Error messages are sentences, not constraint names
+`models.ErrReservationClientExists` / `ErrReservationIPTaken` / `ErrReservationIPLeased`, each
+wrapped alongside `models.ErrConflict`, are mapped by the handler to clear, actionable sentences
+plus a machine-readable `reason` detail. The rule: anything placed in a non-500 error string is
+user-visible, because `httpx.RespondError` sends `err.Error()` straight through to JSON and the
+web UI. Postgres constraint names were leaking into that channel before; now they never are.
+
+### A19.7 Visual consistency
+One pin vocabulary is now defined once in `web/src/app/shared/components/pin-indicator/` and used
+in both the leases table (`leases-table.component.ts`) and the IPAM clients table
+(`prefix-clients.component.ts`):
+
+- `<app-pin-chip [state]="lease.reservation_state" [reservation]="lease.reservation" />` displays the state
+  compactly (the label or icon).
+- `<app-pin-button [state]="lease.reservation_state" [reservation]="lease.reservation" [disabled]="..."
+  [label]="ip" (toggle)="handlePin($event)" />` is the action button.
+
+Both are standalone; the host component imports the component class.
+
+`.gdhcp-table`, `.gdhcp-table th`/`td`, `.gdhcp-table th.actions`/`td.actions`, `.table-wrap`, and
+`.gdhcp-state-chip` (with `.state-active`, `.state-expired`, `.state-released`, `.state-abandoned`)
+were copy-pasted into nine component style blocks. These are now in `web/src/styles.scss` (global);
+the local copies are deleted. Global styles reach emulated-view-encapsulation components.
+
+The CSS vocabulary for binding state uses `.state-active`, etc., uniformly across chips. The icon
+for pinning changed from `bookmark`/`bookmark_add` to `push_pin` to match Material's reservation
+semantics.
+
+Layout rule: on a page hosting both the leases (children) and reservations (addresses) sections, the
+leases come first — children are the structure, addresses are the detail.
+
+### A19.8 Smaller fixes
+- `ListLeases` now honours `ListParams.Search`, so the shared leases-table component's search box
+  is no longer a no-op on the pool detail page.
+- `idx_dhcp_reservations_pool_reserved_ip` added for fast address-side lookups.
+
+A2's CLI verb list: the `lease` verb gains a `PINNED` column to the leases table (no new verbs).
+

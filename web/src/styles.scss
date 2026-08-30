@@ -184,3 +184,74 @@ a {
 .gdhcp-mono {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 }
+
+/* The data table every list and detail page uses. This lived as a
+   copy-pasted block inside nine component `styles` arrays, which is how the
+   DHCP and IPAM tables drifted apart in the first place (amendment A19).
+   Global styles still reach emulated-encapsulation components, so the copies
+   are simply deleted rather than replaced. */
+.gdhcp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.gdhcp-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 8px;
+  white-space: nowrap;
+}
+
+.gdhcp-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--divider-color);
+  vertical-align: middle;
+}
+
+/* Right-aligned trailing action cell, in both the header and the body. */
+.gdhcp-table th.actions,
+.gdhcp-table td.actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Horizontal scroll belongs to the table's own wrapper, never to the page. */
+.table-wrap {
+  overflow-x: auto;
+}
+
+/* Lease binding states. Shared so a lease reads identically in the DHCP
+   leases table and in the IPAM clients table. */
+.gdhcp-state-chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.gdhcp-state-chip.state-active {
+  background: var(--util-ok);
+  color: #fff;
+}
+
+.gdhcp-state-chip.state-expired {
+  background: var(--util-track);
+  color: var(--text-secondary);
+}
+
+.gdhcp-state-chip.state-released {
+  background: var(--bg-highlight);
+  color: var(--primary-color);
+}
+
+.gdhcp-state-chip.state-abandoned {
+  background: var(--status-error);
+  color: #fff;
+}

@@ -23,6 +23,53 @@ const leaseSelectCols = `id, pool_id, ip_address, client_mac, client_id, client_
 	binding_state, binding_server_id, lease_start, lease_end, renewal_time, rebinding_time,
 	created_at, updated_at`
 
+// leaseReservationCols are the seven trailing columns scanned by
+// scanLeaseWithReservation: the projection of dhcp_reservations that helps a
+// lease explain its reservation state (amendment A19). They are always selected
+// from a LEFT JOIN LATERAL subquery, so all seven are null together when there
+// is no matching reservation.
+const leaseReservationCols = `res.id, res.reserved_ip, res.binding_key, res.binding_type,
+	res.is_enabled, res.binding_key = ANY(lk.keys) AS matches_client,
+	res.reserved_ip = l.ip_address AS matches_address`
+
+// leaseReservationLaterals constructs the two lateral joins amendment A19
+// appends to lease reads that reach the JSON API. The "keys" lateral invokes
+// the lease_binding_keys() SQL function to extract the client's candidate
+// binding keys in precedence order. The "reservation" lateral picks the one
+// reservation in the pool most relevant to this lease: matching the client's
+// binding key(s) over the address alone, enabled over disabled, and binding
+// precedence first (see ORDER BY). LIMIT 1 ensures the lease attaches at most
+// one reservation (amendment A19 LeaseReservation is a singleton per lease,
+// not a join that multiplies rows). The WHERE clause's disjunction means an
+// address-only match (res.reserved_ip = l.ip_address) is enough to trigger
+// inclusion — see docs/AMENDMENTS.md A19 "three ways a lease relates to
+// reservations" and LeaseReservationState's documentation.
+func leaseReservationLaterals() string {
+	// The leading newline matters: every call site concatenates this directly
+	// onto a `FROM dhcp_leases l` fragment, and without separating whitespace
+	// the two run together into `FROM dhcp_leases lLEFT JOIN ...`, which
+	// Postgres parses as the alias `lleft` -- every later reference to `l`
+	// then fails with "missing FROM-clause entry for table l".
+	return `
+	LEFT JOIN LATERAL (
+		SELECT lease_binding_keys(l.client_mac, l.client_id, l.client_hostname) AS keys
+	) lk ON TRUE
+	LEFT JOIN LATERAL (
+		SELECT r.id, r.reserved_ip, r.binding_key, r.binding_type, r.is_enabled,
+			r.binding_key = ANY(lk.keys) AS matches_client,
+			r.reserved_ip = l.ip_address AS matches_address
+		FROM dhcp_reservations r
+		WHERE r.pool_id = l.pool_id
+			AND (r.reserved_ip = l.ip_address OR r.binding_key = ANY(lk.keys))
+		ORDER BY (r.binding_key = ANY(lk.keys) AND r.reserved_ip = l.ip_address) DESC,
+			(r.binding_key = ANY(lk.keys)) DESC,
+			r.is_enabled DESC,
+			array_position(lk.keys, r.binding_key) NULLS LAST,
+			r.created_at
+		LIMIT 1
+	) res ON TRUE`
+}
+
 // scanLease scans one row shaped like leaseSelectCols.
 func scanLease(row pgx.Row) (*models.DHCPLease, error) {
 	var l models.DHCPLease
@@ -63,6 +110,55 @@ func scanLeaseWithPriorState(row pgx.Row) (*models.DHCPLease, string, error) {
 	}
 	l.ClientID = clientID
 	return &l, priorState, nil
+}
+
+// scanLeaseWithReservation scans leaseSelectCols plus the seven trailing
+// leaseReservationCols from the reservation laterals (amendment A19). It
+// reconstructs a *LeaseReservation when the reservation id is non-NULL, and
+// calls models.ClassifyLeaseReservation to set l.ReservationState. All
+// reservation columns are NULL together when there is no matching reservation,
+// so they scan into pointer and sql.Null* locals.
+func scanLeaseWithReservation(row pgx.Row) (*models.DHCPLease, error) {
+	var l models.DHCPLease
+	var mac net.HardwareAddr
+	var clientID []byte
+	var resID *string
+	var resReservedIP *net.IP
+	var resBindingKey *string
+	var resBindingType *string
+	var resIsEnabled *bool
+	var resMatchesClient *bool
+	var resMatchesAddress *bool
+
+	if err := row.Scan(
+		&l.ID, &l.PoolID, &l.IPAddress, &mac, &clientID, &l.ClientHostname,
+		&l.BindingState, &l.BindingServerID, &l.LeaseStart, &l.LeaseEnd, &l.RenewalTime, &l.RebindingTime,
+		&l.CreatedAt, &l.UpdatedAt,
+		&resID, &resReservedIP, &resBindingKey, &resBindingType, &resIsEnabled, &resMatchesClient, &resMatchesAddress,
+	); err != nil {
+		return nil, err
+	}
+	if len(mac) > 0 {
+		hw := models.HardwareAddr(mac)
+		l.ClientMAC = &hw
+	}
+	l.ClientID = clientID
+
+	// Reconstruct the LeaseReservation when the id is non-NULL (all seven
+	// columns are NULL together, so checking id is sufficient).
+	if resID != nil {
+		l.Reservation = &models.LeaseReservation{
+			ID:             *resID,
+			ReservedIP:     *resReservedIP,
+			BindingKey:     *resBindingKey,
+			BindingType:    models.BindingType(*resBindingType),
+			IsEnabled:      *resIsEnabled,
+			MatchesClient:  *resMatchesClient,
+			MatchesAddress: *resMatchesAddress,
+		}
+	}
+	l.ReservationState = models.ClassifyLeaseReservation(l.Reservation)
+	return &l, nil
 }
 
 // decodeClientID interprets AllocateLease/RenewLease's clientID string
@@ -525,7 +621,11 @@ func (p *Postgres) AbandonLease(ctx context.Context, leaseID string, clientMAC s
 	return fmt.Errorf("store: abandon lease %s: %w", leaseID, models.ErrLeaseNotFound)
 }
 
-// GetLeaseByIP returns the active lease for ip within poolID.
+// GetLeaseByIP returns the active lease for ip within poolID. This is the
+// pool-scoped variant called only by the DHCP allocation hot path; it does NOT
+// include reservation state via the laterals (amendment A19), so it does not
+// pay for the join cost. The allocation logic runs scanCandidateIPs and
+// reservationForKeys separately; those results are never JSON-serialized.
 func (p *Postgres) GetLeaseByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPLease, error) {
 	row := p.pool.QueryRow(ctx, `SELECT `+leaseSelectCols+` FROM dhcp_leases
 		WHERE pool_id = $1 AND ip_address = $2 AND binding_state = 'active'`, poolID, ip)
@@ -540,6 +640,10 @@ func (p *Postgres) GetLeaseByIP(ctx context.Context, poolID string, ip net.IP) (
 }
 
 // GetLeaseByClient returns the active lease for clientMAC/clientID, if any.
+// This is called only by the DHCP allocation hot path (tryAllocateRound's
+// renew-affinity step); it does NOT include reservation state via the
+// laterals (amendment A19), so it does not pay for the join cost. The result
+// is never JSON-serialized.
 func (p *Postgres) GetLeaseByClient(ctx context.Context, ident models.ClientIdentity) (*models.DHCPLease, error) {
 	var macArg any
 	if ident.MAC != "" {
@@ -613,6 +717,20 @@ func collectLeases(rows pgx.Rows) ([]*models.DHCPLease, error) {
 	return out, rows.Err()
 }
 
+// collectLeasesWithReservation scans rows shaped by scanLeaseWithReservation,
+// including the reservation laterals (amendment A19).
+func collectLeasesWithReservation(rows pgx.Rows) ([]*models.DHCPLease, error) {
+	var out []*models.DHCPLease
+	for rows.Next() {
+		l, err := scanLeaseWithReservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // ExpireLeasesOlderThan marks active/released leases with lease_end < cutoff
 // as expired, decrementing stats_active_lease_count for the ones that were
 // active.
@@ -677,6 +795,38 @@ func (p *Postgres) ReservationForLease(ctx context.Context, poolID string, bindi
 	return r, nil
 }
 
+// ReservationByBindingKey returns the reservation in poolID with bindingKey,
+// or nil if none exists. Amendment A19: used to guard CreateReservation and
+// UpdateReservation against duplicate (pool_id, binding_key) to detect
+// ErrReservationClientExists early.
+func (p *Postgres) ReservationByBindingKey(ctx context.Context, poolID, bindingKey string) (*models.DHCPReservation, error) {
+	row := p.pool.QueryRow(ctx, `
+		SELECT id, pool_id, hostname, description, reserved_ip, binding_key, binding_type, is_enabled,
+			created_at, updated_at, created_by_user_id, updated_by_user_id
+		FROM dhcp_reservations WHERE pool_id = $1 AND binding_key = $2`, poolID, bindingKey)
+	r, err := scanReservation(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return r, err
+}
+
+// ReservationByIP returns the reservation in poolID for address ip, or nil if
+// none exists. Amendment A19: used to guard CreateReservation and
+// UpdateReservation against duplicate (pool_id, reserved_ip) for different
+// clients to detect ErrReservationIPTaken early.
+func (p *Postgres) ReservationByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPReservation, error) {
+	row := p.pool.QueryRow(ctx, `
+		SELECT id, pool_id, hostname, description, reserved_ip, binding_key, binding_type, is_enabled,
+			created_at, updated_at, created_by_user_id, updated_by_user_id
+		FROM dhcp_reservations WHERE pool_id = $1 AND reserved_ip = $2`, poolID, ip)
+	r, err := scanReservation(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return r, err
+}
+
 // ---------------------------------------------------------------------------
 // LeaseQueryStore
 // ---------------------------------------------------------------------------
@@ -684,7 +834,9 @@ func (p *Postgres) ReservationForLease(ctx context.Context, poolID string, bindi
 // ListLeases supports filters "scope_id", "pool_id", "state" plus
 // params.Search, matched case-insensitively against the lease's IP text,
 // MAC text and client hostname so the UI's one search box covers all three
-// without the caller having to guess which field a term belongs to.
+// without the caller having to guess which field a term belongs to. Amendment
+// A19: leases include their reservation state via the reservation laterals,
+// so the UI can display pin state alongside the lease row.
 func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResult[*models.DHCPLease], error) {
 	limit, offset := normalizeListParams(params)
 	scopeID := nilIfEmpty(params.Filters["scope_id"])
@@ -713,14 +865,15 @@ func (p *Postgres) ListLeases(ctx context.Context, params ListParams) (ListResul
 		"updated_at": "l.updated_at",
 	}, "l.ip_address ASC")
 
-	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+` FROM dhcp_leases l`+where+
+	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
+		leaseReservationLaterals()+where+
 		` ORDER BY `+order+` LIMIT $5 OFFSET $6`, scopeID, poolID, state, search, limit, offset)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases: %w", err)
 	}
 	defer rows.Close()
 
-	items, err := collectLeases(rows)
+	items, err := collectLeasesWithReservation(rows)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases: %w", err)
 	}
@@ -790,8 +943,12 @@ func (p *Postgres) ForceRenewLease(ctx context.Context, id string, expiry time.T
 }
 
 func (p *Postgres) GetLease(ctx context.Context, id string) (*models.DHCPLease, error) {
-	row := p.pool.QueryRow(ctx, `SELECT `+leaseSelectCols+` FROM dhcp_leases WHERE id = $1`, id)
-	l, err := scanLease(row)
+	// Amendment A19: annotate the lease with its reservation state via the
+	// laterals. This method returns to the API, not the DHCP engine, so the
+	// cost is justified.
+	row := p.pool.QueryRow(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
+		leaseReservationLaterals()+` WHERE l.id = $1`, id)
+	l, err := scanLeaseWithReservation(row)
 	if err != nil {
 		return nil, mapReadError(err, "get lease "+id)
 	}
@@ -801,22 +958,40 @@ func (p *Postgres) GetLease(ctx context.Context, id string) (*models.DHCPLease, 
 func (p *Postgres) ListLeasesByPool(ctx context.Context, poolID string, params ListParams) (ListResult[*models.DHCPLease], error) {
 	limit, offset := normalizeListParams(params)
 	state := nilIfEmpty(params.Filters["state"])
+	// Amendment A18.1: ListLeasesByPool was missing search support; this table
+	// now honors Search against IP text, MAC text and client hostname, exactly
+	// like ListLeases does. Amendment A19: include reservation state.
+	search := nilIfEmpty(strings.TrimSpace(params.Search))
+
+	const where = `WHERE pool_id = $1
+		AND ($2::text IS NULL OR binding_state = $2)
+		AND ($3::text IS NULL OR (
+			host(ip_address) ILIKE '%' || $3 || '%'
+			OR COALESCE(client_mac::text, '') ILIKE '%' || $3 || '%'
+			OR COALESCE(client_hostname, '') ILIKE '%' || $3 || '%'
+		))`
 
 	var total int64
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dhcp_leases WHERE pool_id = $1 AND ($2::text IS NULL OR binding_state = $2)`,
-		poolID, state).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM dhcp_leases `+where,
+		poolID, state, search).Scan(&total); err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: count leases in pool %s: %w", poolID, err)
 	}
 
-	rows, err := p.pool.Query(ctx, `SELECT `+leaseSelectCols+` FROM dhcp_leases
-		WHERE pool_id = $1 AND ($2::text IS NULL OR binding_state = $2)
-		ORDER BY ip_address LIMIT $3 OFFSET $4`, poolID, state, limit, offset)
+	order := orderByClause(params.Sort, map[string]string{
+		"ip_address": "l.ip_address", "created_at": "l.created_at", "lease_end": "l.lease_end",
+		"client_mac": "l.client_mac", "client_hostname": "l.client_hostname", "binding_state": "l.binding_state",
+		"updated_at": "l.updated_at",
+	}, "l.ip_address ASC")
+
+	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
+		leaseReservationLaterals()+` `+where+
+		` ORDER BY `+order+` LIMIT $4 OFFSET $5`, poolID, state, search, limit, offset)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases in pool %s: %w", poolID, err)
 	}
 	defer rows.Close()
 
-	items, err := collectLeases(rows)
+	items, err := collectLeasesWithReservation(rows)
 	if err != nil {
 		return ListResult[*models.DHCPLease]{}, fmt.Errorf("store: list leases in pool %s: %w", poolID, err)
 	}
@@ -824,9 +999,10 @@ func (p *Postgres) ListLeasesByPool(ctx context.Context, poolID string, params L
 }
 
 func (p *Postgres) GetLeaseByIPGlobal(ctx context.Context, ip net.IP) (*models.DHCPLease, error) {
-	row := p.pool.QueryRow(ctx, `SELECT `+leaseSelectCols+` FROM dhcp_leases
-		WHERE ip_address = $1 AND binding_state = 'active' ORDER BY updated_at DESC LIMIT 1`, ip)
-	l, err := scanLease(row)
+	// Amendment A19: include reservation state via the laterals.
+	row := p.pool.QueryRow(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
+		leaseReservationLaterals()+` WHERE l.ip_address = $1 AND l.binding_state = 'active' ORDER BY l.updated_at DESC LIMIT 1`, ip)
+	l, err := scanLeaseWithReservation(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -841,13 +1017,14 @@ func (p *Postgres) ListLeasesByMAC(ctx context.Context, mac string) ([]*models.D
 	if err != nil {
 		return nil, fmt.Errorf("store: list leases by mac: invalid MAC %q: %w", mac, models.ErrInvalidInput)
 	}
-	rows, err := p.pool.Query(ctx, `SELECT `+leaseSelectCols+` FROM dhcp_leases
-		WHERE client_mac = $1 ORDER BY updated_at DESC`, hw)
+	// Amendment A19: include reservation state via the laterals.
+	rows, err := p.pool.Query(ctx, `SELECT `+prefixCols("l", leaseSelectCols)+`, `+leaseReservationCols+` FROM dhcp_leases l`+
+		leaseReservationLaterals()+` WHERE l.client_mac = $1 ORDER BY l.updated_at DESC`, hw)
 	if err != nil {
 		return nil, fmt.Errorf("store: list leases by mac %s: %w", mac, err)
 	}
 	defer rows.Close()
-	items, err := collectLeases(rows)
+	items, err := collectLeasesWithReservation(rows)
 	if err != nil {
 		return nil, fmt.Errorf("store: list leases by mac %s: %w", mac, err)
 	}
@@ -914,15 +1091,18 @@ func (p *Postgres) ListReservationsByPool(ctx context.Context, poolID string, pa
 	return ListResult[*models.DHCPReservation]{Items: items, Total: total, Limit: limit, Offset: offset}, nil
 }
 
-// rejectConflictingActiveLease returns models.ErrConflict when ip already
-// has an active lease in poolID that belongs to a different client than
-// bindingKey identifies. tryAllocateRound's reservation-match step (amendment
-// A6, step 1) unconditionally wins the allocation round with no fallback to
-// renew-affinity/candidate-scan, so a reservation created for a different
-// client on an already actively-leased IP would silently starve that
-// client's every DHCP request (ErrNoLeases forever, or until the other
-// client's lease naturally expires). A reservation for the same client that
-// already holds the lease (renew-in-place) is not a conflict.
+// rejectConflictingActiveLease returns models.ErrReservationIPLeased (wrapped
+// with models.ErrConflict) when ip already has an active lease in poolID that
+// belongs to a different client than bindingKey identifies. tryAllocateRound's
+// reservation-match step (amendment A6, step 1) unconditionally wins the
+// allocation round with no fallback to renew-affinity/candidate-scan, so a
+// reservation created for a different client on an already actively-leased IP
+// would silently starve that client's every DHCP request (ErrNoLeases forever,
+// or until the other client's lease naturally expires). A reservation for the
+// same client that already holds the lease (renew-in-place) is not a conflict.
+// Amendment A19: wrap with both ErrReservationIPLeased and ErrConflict so the
+// handler can recognise the specific case (address leased) while the generic
+// 409 mapping still applies.
 func (p *Postgres) rejectConflictingActiveLease(ctx context.Context, poolID string, ip net.IP, bindingKey string) error {
 	var mac net.HardwareAddr
 	var clientID []byte
@@ -943,7 +1123,11 @@ func (p *Postgres) rejectConflictingActiveLease(ctx context.Context, poolID stri
 			return nil
 		}
 	}
-	return fmt.Errorf("store: create reservation: ip %s in pool %s already has an active lease for a different client: %w", ip, poolID, models.ErrConflict)
+	// Go 1.26 multi-%w wraps both sentinels so the handler can use errors.Is
+	// to detect this case specifically, while the generic 409 mapping catches
+	// ErrConflict.
+	return fmt.Errorf("store: create reservation: ip %s in pool %s already has an active lease for a different client: %w: %w",
+		ip, poolID, models.ErrReservationIPLeased, models.ErrConflict)
 }
 
 func (p *Postgres) GetReservation(ctx context.Context, id string) (*models.DHCPReservation, error) {
@@ -970,9 +1154,42 @@ func (p *Postgres) CreateReservation(ctx context.Context, r *models.DHCPReservat
 	if !ipInRange(r.ReservedIP, pool.RangeStart, pool.RangeEnd) {
 		return fmt.Errorf("store: create reservation: reserved_ip %s outside pool %s range: %w", r.ReservedIP, r.PoolID, models.ErrInvalidInput)
 	}
+
+	// Amendment A19: look up existing reservations and fail early with precise
+	// sentinels instead of letting the database constraint fail with a raw
+	// constraint name in the error message.
+	//
+	// Guard 1: a reservation with the same (pool_id, binding_key) means this
+	// client is already pinned. The existing reservation's address goes in the
+	// message so the caller can see where the client is pinned.
+	existingClient, err := p.ReservationByBindingKey(ctx, r.PoolID, r.BindingKey)
+	if err != nil {
+		return fmt.Errorf("store: create reservation: check existing client reservation: %w", err)
+	}
+	if existingClient != nil {
+		return fmt.Errorf("store: create reservation: %s already reserved on %s in pool %s: %w: %w",
+			r.BindingKey, existingClient.ReservedIP, r.PoolID, models.ErrReservationClientExists, models.ErrConflict)
+	}
+
+	// Guard 2: a reservation with the same (pool_id, reserved_ip) for a
+	// DIFFERENT binding_key means the address is already reserved to someone
+	// else. Two clients reserving one address would leave whichever one asks
+	// second unable to claim it (amendment A6 step 1 wins unconditionally).
+	existingIP, err := p.ReservationByIP(ctx, r.PoolID, r.ReservedIP)
+	if err != nil {
+		return fmt.Errorf("store: create reservation: check existing ip reservation: %w", err)
+	}
+	if existingIP != nil && existingIP.BindingKey != r.BindingKey {
+		return fmt.Errorf("store: create reservation: %s already reserved for %s in pool %s: %w: %w",
+			r.ReservedIP, existingIP.BindingKey, r.PoolID, models.ErrReservationIPTaken, models.ErrConflict)
+	}
+
+	// Guard 3: an active lease on this address for a different client would be
+	// starved by this reservation (amendment A6 step 1 wins unconditionally).
 	if err := p.rejectConflictingActiveLease(ctx, r.PoolID, r.ReservedIP, r.BindingKey); err != nil {
 		return err
 	}
+
 	if r.ID == "" {
 		r.ID = newUUID()
 	}
@@ -1008,9 +1225,40 @@ func (p *Postgres) UpdateReservation(ctx context.Context, r *models.DHCPReservat
 	if !ipInRange(r.ReservedIP, pool.RangeStart, pool.RangeEnd) {
 		return fmt.Errorf("store: update reservation: reserved_ip %s outside pool %s range: %w", r.ReservedIP, r.PoolID, models.ErrInvalidInput)
 	}
+
+	// Amendment A19: like CreateReservation, check for conflicts early and fail
+	// with precise sentinels. Exclude the row being updated (id <> $n) from
+	// these checks — an update can move the IP or rebind the client, so it
+	// needs identical protection against collisions with OTHER reservations.
+	//
+	// Guard 1: another reservation with the same binding_key would mean this
+	// client has two reservations, which violates the UNIQUE constraint.
+	existingClient, err := p.ReservationByBindingKey(ctx, r.PoolID, r.BindingKey)
+	if err != nil {
+		return fmt.Errorf("store: update reservation: check existing client reservation: %w", err)
+	}
+	if existingClient != nil && existingClient.ID != r.ID {
+		return fmt.Errorf("store: update reservation: %s already reserved on %s in pool %s: %w: %w",
+			r.BindingKey, existingClient.ReservedIP, r.PoolID, models.ErrReservationClientExists, models.ErrConflict)
+	}
+
+	// Guard 2: another reservation with the same address and a different
+	// binding_key would starve the other client.
+	existingIP, err := p.ReservationByIP(ctx, r.PoolID, r.ReservedIP)
+	if err != nil {
+		return fmt.Errorf("store: update reservation: check existing ip reservation: %w", err)
+	}
+	if existingIP != nil && existingIP.ID != r.ID && existingIP.BindingKey != r.BindingKey {
+		return fmt.Errorf("store: update reservation: %s already reserved for %s in pool %s: %w: %w",
+			r.ReservedIP, existingIP.BindingKey, r.PoolID, models.ErrReservationIPTaken, models.ErrConflict)
+	}
+
+	// Guard 3: an active lease on this address for a different client would be
+	// starved by this reservation (amendment A6 step 1 wins unconditionally).
 	if err := p.rejectConflictingActiveLease(ctx, r.PoolID, r.ReservedIP, r.BindingKey); err != nil {
 		return err
 	}
+
 	err = p.pool.QueryRow(ctx, `
 		UPDATE dhcp_reservations SET hostname=$2, description=$3, reserved_ip=$4, binding_key=$5, binding_type=$6,
 			is_enabled=$7, updated_by_user_id=$8, updated_at=now()

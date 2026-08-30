@@ -399,6 +399,42 @@ export type BindingType = 'mac' | 'client_id' | 'hostname' | 'circuit_id' | 'rem
 
 export type ClientKind = 'lease' | 'reservation';
 
+/**
+ * How a lease (or an IPAM client row) relates to the reservations in its
+ * pool. "Is this address reserved?" and "is this client reserved?" are
+ * different questions, and an operator who cannot tell them apart keeps
+ * trying to pin a client that is already pinned — which the server rejects
+ * on UNIQUE (pool_id, binding_key). Amendment A19.
+ */
+export type LeaseReservationState =
+  /** Nothing reserves this client or this address — pinning is safe. */
+  | 'not_pinned'
+  /** An enabled reservation binds this client to this exact address. */
+  | 'pinned'
+  /** The same binding exists but is disabled, so the engine ignores it: it
+   *  neither holds the address nor blocks anyone else from taking it. */
+  | 'pinned_disabled'
+  /** This client is pinned to a *different* address. A second reservation
+   *  would be rejected; the existing one has to be moved. */
+  | 'pinned_elsewhere'
+  /** This address is reserved for a different client, which will claim it
+   *  once the current holder's lease lapses. */
+  | 'address_reserved';
+
+/** The one reservation that concerns a lease — matching its client, or
+ *  failing that its address. Enough to explain the state and to act on it. */
+export interface LeaseReservation {
+  id: string;
+  reserved_ip: string;
+  binding_key: string;
+  binding_type: BindingType;
+  is_enabled: boolean;
+  /** `binding_key` is one of this client's own candidate keys. */
+  matches_client: boolean;
+  /** `reserved_ip` is this row's address. */
+  matches_address: boolean;
+}
+
 export interface DHCPReservation {
   id: string;
   pool_id: string;
@@ -426,6 +462,7 @@ export interface UpdateReservationRequest {
   is_enabled?: boolean;
   binding_key?: string;
   binding_type?: BindingType;
+  reserved_ip?: string;
 }
 
 /** Request for creating a reservation with raw binding values.
@@ -478,6 +515,14 @@ export interface DHCPClient {
   /** Reservation-only. Null for leases. */
   is_enabled: boolean | null;
 
+  /** A19: the same pin state the DHCP leases table renders, so both tables
+   *  read one field instead of each inferring it differently. A lease row
+   *  gets the reservation that concerns it; a reservation row describes
+   *  itself and is always pinned (or pinned_disabled). */
+  reservation_state: LeaseReservationState;
+  /** The reservation behind `reservation_state`, or null when not_pinned. */
+  reservation: LeaseReservation | null;
+
   created_at: string;
   updated_at: string;
 }
@@ -506,6 +551,11 @@ export interface DHCPLease {
   rebinding_time: string | null;
   created_at: string;
   updated_at: string;
+
+  /** A19: derived on read from the pool's reservations, never stored. */
+  reservation_state: LeaseReservationState;
+  /** The reservation behind `reservation_state`, or null when not_pinned. */
+  reservation: LeaseReservation | null;
 }
 
 /** The operator actions POST /leases/bulk accepts, and that each lease

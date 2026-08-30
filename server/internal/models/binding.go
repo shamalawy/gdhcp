@@ -314,6 +314,15 @@ type DHCPClient struct {
 	BindingType *BindingType `json:"binding_type"`
 	IsEnabled   *bool        `json:"is_enabled"`
 
+	// ReservationState and Reservation are amendment A19, carried here for
+	// exactly the same reason DHCPLease carries them: this table and the DHCP
+	// leases table must render the same pin state from the same field rather
+	// than each inferring it differently. A lease row gets the reservation
+	// that concerns it, if any; a reservation row describes itself, so it is
+	// always "pinned" (or "pinned_disabled" when is_enabled is false).
+	ReservationState LeaseReservationState `json:"reservation_state"`
+	Reservation      *LeaseReservation     `json:"reservation"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

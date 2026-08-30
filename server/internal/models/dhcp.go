@@ -100,4 +100,84 @@ type DHCPLease struct {
 	RebindingTime   *time.Time        `json:"rebinding_time" db:"rebinding_time"`
 	CreatedAt       time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at" db:"updated_at"`
+
+	// ReservationState and Reservation are amendment A19: they are derived on
+	// read from dhcp_reservations, never stored on the lease row. Only the
+	// API-facing read paths populate them; the DHCP engine's own hot-path
+	// lookups leave ReservationState empty, and those leases never reach JSON.
+	ReservationState LeaseReservationState `json:"reservation_state" db:"-"`
+	Reservation      *LeaseReservation     `json:"reservation" db:"-"`
+}
+
+// LeaseReservationState names how a lease relates to the reservations in its
+// pool. It exists because "is this address reserved?" and "is this client
+// reserved?" are different questions, and an operator who cannot tell them
+// apart will keep trying to pin a client that is already pinned -- which
+// UNIQUE (pool_id, binding_key) rejects.
+type LeaseReservationState string
+
+const (
+	// LeaseNotPinned: no reservation in the pool matches this lease's client
+	// or its address. Pinning is safe.
+	LeaseNotPinned LeaseReservationState = "not_pinned"
+
+	// LeasePinned: an enabled reservation binds this lease's client to this
+	// exact address. The address the client holds is the address it is
+	// guaranteed to keep.
+	LeasePinned LeaseReservationState = "pinned"
+
+	// LeasePinnedDisabled: the same binding exists but the reservation is
+	// disabled. reservationForKeys and scanCandidateIPs both filter on
+	// is_enabled, so a disabled reservation is invisible to allocation: it
+	// neither holds the address nor blocks anyone else from taking it.
+	LeasePinnedDisabled LeaseReservationState = "pinned_disabled"
+
+	// LeasePinnedElsewhere: this client is pinned, but to a DIFFERENT
+	// address. Creating a second reservation for it would violate
+	// UNIQUE (pool_id, binding_key) -- the existing reservation has to be
+	// moved, not added to. This is the state that produced the raw
+	// "duplicate key value violates unique constraint" error operators saw.
+	LeasePinnedElsewhere LeaseReservationState = "pinned_elsewhere"
+
+	// LeaseAddressReserved: this address is reserved for a different client.
+	// The current holder keeps it until its lease lapses, at which point the
+	// reserved client can claim it.
+	LeaseAddressReserved LeaseReservationState = "address_reserved"
+)
+
+// LeaseReservation is the one reservation that concerns a lease: the
+// reservation matching the lease's client, or failing that the reservation
+// on the lease's address. It is a projection of dhcp_reservations, not the
+// full row -- a lease row only needs enough to explain its state and to let
+// the UI act on the reservation (unpin, or move the pin here).
+type LeaseReservation struct {
+	ID          string      `json:"id"`
+	ReservedIP  net.IP      `json:"reserved_ip"`
+	BindingKey  string      `json:"binding_key"`
+	BindingType BindingType `json:"binding_type"`
+	IsEnabled   bool        `json:"is_enabled"`
+
+	// MatchesClient reports that BindingKey is one of the lease client's own
+	// candidate keys (see ClientIdentity.BindingKeys).
+	MatchesClient bool `json:"matches_client"`
+	// MatchesAddress reports that ReservedIP is the lease's address.
+	MatchesAddress bool `json:"matches_address"`
+}
+
+// ClassifyLeaseReservation derives a lease's LeaseReservationState from the
+// reservation found for it, if any. Postgres and the in-memory mock both
+// call this, so the two can never disagree about what "pinned" means.
+func ClassifyLeaseReservation(res *LeaseReservation) LeaseReservationState {
+	switch {
+	case res == nil:
+		return LeaseNotPinned
+	case res.MatchesClient && res.MatchesAddress && res.IsEnabled:
+		return LeasePinned
+	case res.MatchesClient && res.MatchesAddress:
+		return LeasePinnedDisabled
+	case res.MatchesClient:
+		return LeasePinnedElsewhere
+	default:
+		return LeaseAddressReserved
+	}
 }

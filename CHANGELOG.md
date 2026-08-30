@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reservation state is now visible in lease reads: DHCP and IPAM leases tables show whether a client is pinned, and with which address if pinned elsewhere (amendment A19)
+- CLI `lease` command now shows a `PINNED` column in the leases table
+- Store now rejects duplicate reservations on the same address in a pool with `ErrReservationIPTaken`
+- `PUT /reservations/{id}` now accepts optional `reserved_ip` field and treats absent fields as "leave alone", fixing enable/disable toggles that were erasing hostname and description
+- Error messages for reservation conflicts are now sentences, not Postgres constraint names (amendment A19)
+
 ## [0.1.0] - 2026-08-30
 
 Initial public release of gdhcp: a high-availability DHCP server with integrated IPAM, REST API, CLI, and Angular 18 web UI.

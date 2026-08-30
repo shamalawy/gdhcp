@@ -126,16 +126,45 @@ func newLeaseDeleteCmd(flags *persistentFlags) *cobra.Command {
 }
 
 func leaseTable(leases []models.DHCPLease) ([]string, [][]string) {
-	headers := []string{"ID", "POOL_ID", "IP_ADDRESS", "CLIENT_MAC", "HOSTNAME", "STATE", "LEASE_END"}
+	headers := []string{"ID", "POOL_ID", "IP_ADDRESS", "CLIENT_MAC", "HOSTNAME", "STATE", "PINNED", "LEASE_END"}
 	rows := make([][]string, 0, len(leases))
 	for _, l := range leases {
 		mac := "-"
 		if l.ClientMAC != nil {
 			mac = common.MAC(l.ClientMAC)
 		}
-		rows = append(rows, []string{l.ID, l.PoolID, common.IP(l.IPAddress), mac, common.Str(l.ClientHostname), string(l.BindingState), common.Time(l.LeaseEnd)})
+		// Render the PINNED column compactly and truthfully (amendment A19):
+		// "-" for not_pinned, "yes" for pinned, "off" for pinned_disabled,
+		// "->IP" for pinned_elsewhere (shows the reserved address), "other" for
+		// address_reserved (a different client's reservation on this address).
+		pinned := pinStateColumn(l)
+		rows = append(rows, []string{l.ID, l.PoolID, common.IP(l.IPAddress), mac, common.Str(l.ClientHostname), string(l.BindingState), pinned, common.Time(l.LeaseEnd)})
 	}
 	return headers, rows
+}
+
+// pinStateColumn renders a lease's reservation state for the PINNED column,
+// answering the question "is this client pinned?" at a glance. Amendment A19.
+func pinStateColumn(l models.DHCPLease) string {
+	switch l.ReservationState {
+	case models.LeaseNotPinned:
+		return "-"
+	case models.LeasePinned:
+		return "yes"
+	case models.LeasePinnedDisabled:
+		return "off"
+	case models.LeasePinnedElsewhere:
+		// Show where this client's reservation points, so the operator knows
+		// a move is needed, not a new reservation.
+		if l.Reservation != nil {
+			return "->" + common.IP(l.Reservation.ReservedIP)
+		}
+		return "elsewhere"
+	case models.LeaseAddressReserved:
+		return "other"
+	default:
+		return "?"
+	}
 }
 
 func newLeaseListCmd(flags *persistentFlags) *cobra.Command {

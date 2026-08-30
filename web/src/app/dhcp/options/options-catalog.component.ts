@@ -90,26 +90,8 @@ import { OptionCatalogService } from '../shared/option-catalog.service';
         max-width: 360px;
         margin-bottom: 16px;
       }
-      .table-wrap {
-        overflow-x: auto;
-      }
-      .gdhcp-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-      }
-      .gdhcp-table th {
-        text-align: left;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-color);
-        padding: 8px;
-      }
+      /* Override global vertical-align for compact code/type display. */
       .gdhcp-table td {
-        padding: 8px;
-        border-bottom: 1px solid var(--divider-color);
         vertical-align: top;
       }
       .col-code {
