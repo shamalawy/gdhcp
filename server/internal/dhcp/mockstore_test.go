@@ -35,6 +35,7 @@ type mockStore struct {
 	allocateErr          error
 	allocateLastIdent    models.ClientIdentity
 	allocateLastHostname *string
+	allocateLastLeaseDur time.Duration
 	renewCalled          bool
 
 	servers              []*models.ClusterServer
@@ -75,9 +76,10 @@ var _ store.Store = (*mockStore)(nil)
 // path calls (AllocateLease, GetLeaseByIP, RenewLease); stubs otherwise.
 // ---------------------------------------------------------------------------
 
-func (m *mockStore) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string) (*models.DHCPLease, error) {
+func (m *mockStore) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string, leaseDur time.Duration) (*models.DHCPLease, error) {
 	m.allocateLastIdent = ident
 	m.allocateLastHostname = hostname
+	m.allocateLastLeaseDur = leaseDur
 	if m.allocateErr != nil {
 		return nil, m.allocateErr
 	}

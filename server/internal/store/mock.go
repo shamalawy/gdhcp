@@ -1352,7 +1352,7 @@ func (m *Mock) claimLeaseIPLocked(poolID string, ip net.IP, clientMAC, clientID 
 	return lease, true
 }
 
-func (m *Mock) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string) (*models.DHCPLease, error) {
+func (m *Mock) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string, leaseDur time.Duration) (*models.DHCPLease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1367,7 +1367,10 @@ func (m *Mock) AllocateLease(ctx context.Context, poolID string, ident models.Cl
 	}
 
 	now := time.Now().UTC()
-	leaseTime := 24 * time.Hour
+	leaseTime := leaseDur
+	if leaseTime <= 0 {
+		leaseTime = 24 * time.Hour
+	}
 	end := now.Add(leaseTime)
 	renewal := now.Add(leaseTime / 2)
 	rebind := now.Add(leaseTime * 7 / 8)

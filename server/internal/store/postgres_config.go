@@ -300,12 +300,28 @@ func (p *Postgres) optionValueAt(ctx context.Context, code int16, level models.O
 // orderedTemplateIDs returns the IDs of templates associated with scopeID
 // and/or poolID, ordered by priority descending (highest priority checked
 // first), scope associations before pool associations at equal priority.
+// An absent scope/pool is passed as a NULL uuid rather than an empty string:
+// `scope_id = $1 AND $1 <> ”` reads naturally but Postgres infers $1's type
+// as uuid from the equality, then casts the ” literal to uuid too, so the
+// statement fails with `invalid input syntax for type uuid: ""` on *every*
+// call, whatever the arguments. `scope_id = NULL` is never true, which is the
+// skip this guard was reaching for.
 func (p *Postgres) orderedTemplateIDs(ctx context.Context, scopeID, poolID string) ([]string, error) {
+	if scopeID == "" && poolID == "" {
+		return nil, nil
+	}
+	var scopeArg, poolArg any
+	if scopeID != "" {
+		scopeArg = scopeID
+	}
+	if poolID != "" {
+		poolArg = poolID
+	}
 	rows, err := p.pool.Query(ctx, `
-		SELECT template_id, priority, 0 AS src FROM dhcp_template_scopes WHERE scope_id = $1 AND $1 <> ''
+		SELECT template_id, priority, 0 AS src FROM dhcp_template_scopes WHERE scope_id = $1::uuid
 		UNION ALL
-		SELECT template_id, priority, 1 AS src FROM dhcp_template_pools WHERE pool_id = $2 AND $2 <> ''
-		ORDER BY priority DESC, src ASC`, scopeID, poolID)
+		SELECT template_id, priority, 1 AS src FROM dhcp_template_pools WHERE pool_id = $2::uuid
+		ORDER BY priority DESC, src ASC`, scopeArg, poolArg)
 	if err != nil {
 		return nil, fmt.Errorf("store: ordered templates for scope %s pool %s: %w", scopeID, poolID, err)
 	}

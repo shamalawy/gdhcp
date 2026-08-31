@@ -712,3 +712,59 @@ in more than one routing instance. The column is therefore driven by an optional
 `vrfNamesById` input — supply the map to get the column, omit it to leave the table as it was.
 `GET /vlans/{id}/prefixes` returns `vrf_id` but no VRF name, so the caller resolves names with
 one `GET /vrfs` call.
+
+## A22. Answering clients in INIT, the stored lease length, and template option lookup
+Three defects found by running the engine against real DHCP clients on an isolated L2 segment
+rather than against unit tests. Each is independent; they are grouped because one test run
+surfaced all three.
+
+### A22.1 A reply to a client that has no address yet must be delivered by hardware address
+`replyDestination`'s case 4 — neither `giaddr` nor `ciaddr` set and the client left the BOOTP
+broadcast flag clear — addressed the reply to `yiaddr` and wrote it to the ordinary UDP socket.
+That cannot work. The client does not hold `yiaddr` yet, so the kernel ARPs for it, nothing
+answers (nothing *can* answer for an address that has not been handed out), and the reply is
+dropped in the queue. The client never sees an OFFER.
+
+This is not an edge case. ISC dhclient, busybox udhcpc, Windows and macOS all leave the
+broadcast flag clear by default; a packet capture of either Linux client shows
+`Flags [none] (0x0000)`. In practice the engine answered only the clients that opted into
+broadcast, which is close to none of them.
+
+`server/internal/dhcp/rawsend.go` opens one `AF_PACKET` socket per interface (`packet.Datagram`,
+so the kernel still builds the Ethernet header) and writes the IPv4 and UDP headers itself,
+addressed to the client's `chaddr`. No routing decision, no ARP. This is what ISC dhcpd,
+dnsmasq and Kea do for the same reason.
+
+The socket needs `CAP_NET_RAW`, which `deploy/docker/Dockerfile`'s `setcap` and
+`deploy/systemd/gdhcp.service`'s `AmbientCapabilities` already grant. When it cannot be opened
+the engine logs a warning naming the missing capability and falls back to the old UDP write, so
+a constrained runtime degrades to the previous behaviour instead of failing to start.
+
+Only case 4 changes. A relayed reply goes to the relay, a renewing client is reachable at
+`ciaddr`, and a client that did set the broadcast flag gets a broadcast — all three remain
+ordinary UDP writes, since all three are addressable by IP.
+
+### A22.2 The stored lease length is the resolved lease length
+`Postgres.AllocateLease` opened with `leaseTime := 24 * time.Hour` and had no parameter to
+override it. The engine resolved Option 51 through the full inheritance chain, advertised that
+value in the OFFER, and then wrote a 24-hour row regardless. With
+`default_lease_time: 600` the OFFER said 600s, the ACK said 86399s and the database said one
+day: three different answers to one question, and the reaper expiring leases a day after the
+client believed they had lapsed.
+
+`AllocateLease` now takes a `leaseDur time.Duration`. `dhcp/allocation.go` resolves it per
+scope/pool *before* claiming — the duration depends on the pool, and the pool is chosen during
+allocation — so the persisted expiry and the advertised expiry come from the same call.
+A non-positive `leaseDur` still falls back to 24h, so a caller that passes nothing can never
+write a zero-length lease.
+
+### A22.3 `orderedTemplateIDs`' empty-string guard was really a uuid cast
+The query read `WHERE scope_id = $1 AND $1 <> ''`, intending "skip this arm when no scope was
+given". Postgres infers `$1`'s type as `uuid` from the equality, then applies that type to the
+`''` literal too, so every execution failed with `invalid input syntax for type uuid: ""` —
+whatever the arguments were, including the ordinary case where both IDs are valid. The template
+tier of option inheritance had therefore never resolved anything; each lookup logged
+`resolve option failed, skipping` and fell through. A single DORA exchange produced dozens.
+
+An absent scope or pool is now passed as a NULL uuid instead. `scope_id = NULL` is never true,
+which is the skip the guard was reaching for, and the comparison the cast came from is gone.

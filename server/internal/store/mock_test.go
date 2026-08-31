@@ -51,7 +51,7 @@ func TestMockAllocateLeaseScansAscendingAndReusesAffinity(t *testing.T) {
 	m := NewMock()
 	poolID := newTestPool(t, m, "10.0.0.1", "10.0.0.3") // 3 usable addresses.
 
-	leaseA, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:aa:aa:aa:aa:aa"}, nil)
+	leaseA, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:aa:aa:aa:aa:aa"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate for A: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestMockAllocateLeaseScansAscendingAndReusesAffinity(t *testing.T) {
 		t.Errorf("expected lowest free IP 10.0.0.1 first, got %s", leaseA.IPAddress)
 	}
 
-	leaseB, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "bb:bb:bb:bb:bb:bb"}, nil)
+	leaseB, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "bb:bb:bb:bb:bb:bb"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate for B: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestMockAllocateLeaseScansAscendingAndReusesAffinity(t *testing.T) {
 
 	// Renew affinity: re-allocating for A must return the same IP rather
 	// than scanning for a new one (amendment A6 step 2).
-	leaseAAgain, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:aa:aa:aa:aa:aa"}, nil)
+	leaseAAgain, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:aa:aa:aa:aa:aa"}, nil, 0)
 	if err != nil {
 		t.Fatalf("re-allocate for A: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestMockAllocateLeaseScansAscendingAndReusesAffinity(t *testing.T) {
 		t.Errorf("expected renew affinity to reuse the same lease row")
 	}
 
-	leaseC, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "cc:cc:cc:cc:cc:cc"}, nil)
+	leaseC, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "cc:cc:cc:cc:cc:cc"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate for C: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestMockAllocateLeaseScansAscendingAndReusesAffinity(t *testing.T) {
 	}
 
 	// Pool is now exhausted: a fourth distinct client must get ErrNoLeases.
-	_, err = m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "dd:dd:dd:dd:dd:dd"}, nil)
+	_, err = m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "dd:dd:dd:dd:dd:dd"}, nil, 0)
 	if !errors.Is(err, models.ErrNoLeases) {
 		t.Fatalf("expected ErrNoLeases on exhausted pool, got %v", err)
 	}
@@ -112,7 +112,7 @@ func TestMockAllocateLeasePrefersReservation(t *testing.T) {
 		t.Fatalf("create reservation: %v", err)
 	}
 
-	lease, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: mac}, nil)
+	lease, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: mac}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate lease: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestMockLeaseAdminActions(t *testing.T) {
 	m := NewMock()
 	poolID := newTestPool(t, m, "10.0.0.1", "10.0.0.6")
 
-	lease, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, strPtr("box-1"))
+	lease, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, strPtr("box-1"), 0)
 	if err != nil {
 		t.Fatalf("allocate lease: %v", err)
 	}
@@ -462,10 +462,10 @@ func TestMockListLeasesSearch(t *testing.T) {
 	m := NewMock()
 	poolID := newTestPool(t, m, "10.0.0.1", "10.0.0.6")
 
-	if _, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, strPtr("alpha-box")); err != nil {
+	if _, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, strPtr("alpha-box"), 0); err != nil {
 		t.Fatalf("allocate lease 1: %v", err)
 	}
-	if _, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "11:22:33:44:55:66"}, strPtr("beta-box")); err != nil {
+	if _, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "11:22:33:44:55:66"}, strPtr("beta-box"), 0); err != nil {
 		t.Fatalf("allocate lease 2: %v", err)
 	}
 
@@ -632,12 +632,12 @@ func TestListClientsUnderPrefixOneRowPerAddress(t *testing.T) {
 	}
 
 	// Allocate two leases (for different clients)
-	lease1, err := m.AllocateLease(ctx, pool.ID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, nil)
+	lease1, err := m.AllocateLease(ctx, pool.ID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate lease 1: %v", err)
 	}
 
-	lease2, err := m.AllocateLease(ctx, pool.ID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:02"}, nil)
+	lease2, err := m.AllocateLease(ctx, pool.ID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:02"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate lease 2: %v", err)
 	}
@@ -754,13 +754,13 @@ func TestListClientsUnderPrefixStatusFilter(t *testing.T) {
 	poolID := pool.ID
 
 	// Allocate an active lease (assigned status)
-	active, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, nil)
+	active, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate lease 1: %v", err)
 	}
 
 	// Allocate a second lease and mark it as abandoned (abandoned status)
-	abandoned, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:05"}, nil)
+	abandoned, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:05"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate lease 2: %v", err)
 	}
@@ -769,7 +769,7 @@ func TestListClientsUnderPrefixStatusFilter(t *testing.T) {
 	}
 
 	// Allocate a third lease and release it (free status)
-	released, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:02"}, nil)
+	released, err := m.AllocateLease(ctx, poolID, models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:02"}, nil, 0)
 	if err != nil {
 		t.Fatalf("allocate lease 3: %v", err)
 	}

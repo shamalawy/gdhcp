@@ -62,7 +62,12 @@ type LeaseStore interface {
 	// CONFLICT DO NOTHING with up to 3 retry rounds. Returns models.ErrNoLeases
 	// if no IP is available after retries are exhausted. The ident parameter
 	// is a models.ClientIdentity; hostname, if non-nil, is stored in the lease.
-	AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string) (*models.DHCPLease, error)
+	//
+	// leaseDur is the lease length to persist — the caller's resolved
+	// Option 51 / config.DHCP.DefaultLeaseTime value, so the stored expiry
+	// matches what the client is told on the wire. A non-positive leaseDur
+	// falls back to 24h so a bad caller never writes a zero-length lease.
+	AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string, leaseDur time.Duration) (*models.DHCPLease, error)
 
 	// RenewLease extends the lease expiry time for an existing lease.
 	// Returns models.ErrLeaseNotFound if the lease is expired or clientMAC

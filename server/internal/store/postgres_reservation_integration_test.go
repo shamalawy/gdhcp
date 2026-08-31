@@ -95,7 +95,7 @@ func TestPostgresReservationBindingsAreHonoured(t *testing.T) {
 	hostname := "integration"
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lease, err := st.AllocateLease(ctx, poolID, tc.ident, &hostname)
+			lease, err := st.AllocateLease(ctx, poolID, tc.ident, &hostname, 0)
 			if err != nil {
 				t.Fatalf("AllocateLease: %v", err)
 			}
@@ -115,7 +115,7 @@ func TestPostgresReservationBindingsAreHonoured(t *testing.T) {
 	// address in models.BindingTypePrecedence.
 	t.Run("client_id outranks mac", func(t *testing.T) {
 		lease, err := st.AllocateLease(ctx, poolID,
-			models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01", ClientID: "01aabbccdd"}, &hostname)
+			models.ClientIdentity{MAC: "aa:bb:cc:dd:ee:01", ClientID: "01aabbccdd"}, &hostname, 0)
 		if err != nil {
 			t.Fatalf("AllocateLease: %v", err)
 		}

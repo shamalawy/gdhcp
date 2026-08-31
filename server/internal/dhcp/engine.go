@@ -91,6 +91,13 @@ type Engine struct {
 	listenersMu sync.Mutex
 	listeners   map[string]*InterfaceListener
 
+	// rawSenders holds one AF_PACKET sender per interface, used to address
+	// a reply to a client that has no IP yet (see rawsend.go). An interface
+	// is absent from the map when the socket could not be opened (no
+	// CAP_NET_RAW), in which case sendReply falls back to the UDP path.
+	rawSendersMu sync.Mutex
+	rawSenders   map[string]*rawSender
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -141,6 +148,7 @@ func New(cfg *config.Config, st store.Store, gate ServingGate, log *slog.Logger)
 		expiryReaperInterval: 60 * time.Second,
 		vrfCache:             make(map[string]vrfCacheEntry),
 		listeners:            make(map[string]*InterfaceListener),
+		rawSenders:           make(map[string]*rawSender),
 		serverID:             serverID,
 	}, nil
 }
@@ -192,7 +200,23 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.listeners[iface.Name] = l
 		e.wg.Add(1)
 		go e.serveListener(l)
-		e.log.Info("dhcp: listening", "interface", iface.Name, "vrf_id_hint", iface.VRFID)
+
+		// Best-effort: without this, clients that leave the broadcast flag
+		// clear (the Linux/Windows/macOS default) never receive an OFFER.
+		// Not fatal -- the engine still serves broadcast-flag clients.
+		rawOK := true
+		rs, rawErr := newRawSender(iface.Name)
+		if rawErr != nil {
+			rawOK = false
+			e.log.Warn("dhcp: no raw sender; clients that do not set the broadcast flag will not be answered on this interface",
+				"interface", iface.Name, "error", rawErr, "hint", "grant CAP_NET_RAW")
+		} else {
+			e.rawSendersMu.Lock()
+			e.rawSenders[iface.Name] = rs
+			e.rawSendersMu.Unlock()
+		}
+
+		e.log.Info("dhcp: listening", "interface", iface.Name, "vrf_id_hint", iface.VRFID, "raw_send", rawOK)
 	}
 	e.listenersMu.Unlock()
 
@@ -255,8 +279,23 @@ func (e *Engine) Stop() error {
 	}
 	e.listenersMu.Unlock()
 
+	e.rawSendersMu.Lock()
+	for name, rs := range e.rawSenders {
+		_ = rs.Close()
+		delete(e.rawSenders, name)
+	}
+	e.rawSendersMu.Unlock()
+
 	e.wg.Wait()
 	return nil
+}
+
+// rawSenderFor returns the AF_PACKET sender for ifname, or nil when one
+// could not be opened at Start (see rawsend.go).
+func (e *Engine) rawSenderFor(ifname string) *rawSender {
+	e.rawSendersMu.Lock()
+	defer e.rawSendersMu.Unlock()
+	return e.rawSenders[ifname]
 }
 
 // dispatch is invoked by serveListener for every parsed DHCPv4 packet

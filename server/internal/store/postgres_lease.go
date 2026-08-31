@@ -293,7 +293,7 @@ const candidateBatchSize = 8
 // AllocateLease implements amendment A6's algorithm: reservation match,
 // then client renew-affinity, then a scan of unused candidate IPs, each
 // claimed via claimLeaseIP; up to 3 rounds before giving up.
-func (p *Postgres) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string) (*models.DHCPLease, error) {
+func (p *Postgres) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string, leaseDur time.Duration) (*models.DHCPLease, error) {
 	var mac net.HardwareAddr
 	if ident.MAC != "" {
 		parsed, err := net.ParseMAC(ident.MAC)
@@ -309,7 +309,12 @@ func (p *Postgres) AllocateLease(ctx context.Context, poolID string, ident model
 		return nil, fmt.Errorf("store: allocate lease: load pool %s: %w", poolID, err)
 	}
 
-	leaseTime := 24 * time.Hour
+	// The caller's resolved lease length wins; the 24h default only covers a
+	// caller that passed nothing, so a lease is never written zero-length.
+	leaseTime := leaseDur
+	if leaseTime <= 0 {
+		leaseTime = 24 * time.Hour
+	}
 	start := time.Now().UTC()
 	end := start.Add(leaseTime)
 	renewal := start.Add(leaseTime / 2)

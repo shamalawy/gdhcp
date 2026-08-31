@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clients that leave the BOOTP broadcast flag clear — ISC dhclient, busybox udhcpc, Windows and macOS, i.e. most of them — never received an OFFER. The reply was addressed to `yiaddr` and written to the UDP socket, so the kernel ARPed for an address the client cannot yet answer for and dropped the datagram. Replies to a client in INIT are now delivered to its hardware address over `AF_PACKET` (amendment A22)
+- The lease length written to the database was hardcoded to 24 hours, ignoring both Option 51 and `dhcp.default_lease_time`. The OFFER, the ACK and the stored row could all disagree; leases outlived what the client was told by up to a day. `AllocateLease` now takes the resolved duration (amendment A22)
+- Template-level DHCP options never resolved. `orderedTemplateIDs`' `AND $1 <> ''` guard made Postgres cast `''` to `uuid`, so the query failed on every call regardless of its arguments, logging `resolve option failed, skipping` dozens of times per exchange. An absent scope/pool is now passed as NULL (amendment A22)
 - The VLAN detail page (`/ipam/vlans/{id}`) rendered an empty box. Its data-loading `effect()` was missing `allowSignalWrites`, so Angular threw `NG0600` before the first request was ever made and the page stayed on a loading skeleton that had no styles of its own (amendment A21)
 
 ### Added

@@ -90,7 +90,11 @@ func (e *Engine) allocate(ctx context.Context, scopes []*models.DHCPScope, pkt *
 			if !pool.IsEnabled {
 				continue
 			}
-			lease, err := e.allocateFromPool(ctx, pool, ident, hostname)
+			// Resolve the lease length against this scope/pool before
+			// claiming, so the row written to the store carries the same
+			// expiry the OFFER/ACK advertises rather than a store default.
+			leaseDur := time.Duration(e.resolveLeaseSeconds(ctx, scope.ID, pool.ID, "")) * time.Second
+			lease, err := e.allocateFromPool(ctx, pool, ident, hostname, leaseDur)
 			if err != nil {
 				if errors.Is(err, models.ErrNoLeases) {
 					lastErr = err
@@ -115,10 +119,10 @@ const maxPingRetries = 3
 // answer an ICMP echo before returning it — releasing and retrying against
 // the same pool (a fresh candidate; A6's ON CONFLICT DO NOTHING scan skips
 // what's already claimed) if it does.
-func (e *Engine) allocateFromPool(ctx context.Context, pool *models.DHCPPool, ident models.ClientIdentity, hostname *string) (*models.DHCPLease, error) {
+func (e *Engine) allocateFromPool(ctx context.Context, pool *models.DHCPPool, ident models.ClientIdentity, hostname *string, leaseDur time.Duration) (*models.DHCPLease, error) {
 	macStr := ident.MAC
 	for attempt := 0; attempt < maxPingRetries; attempt++ {
-		lease, err := e.store.AllocateLease(ctx, pool.ID, ident, hostname)
+		lease, err := e.store.AllocateLease(ctx, pool.ID, ident, hostname, leaseDur)
 		if err != nil {
 			return nil, err
 		}

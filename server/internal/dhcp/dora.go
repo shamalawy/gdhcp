@@ -529,15 +529,57 @@ func (e *Engine) transactionLog(pkt *DHCPPacket, sc *servingContext, msgType, sc
 //  2. ciaddr set (renewing/informing): unicast to the client's own address,
 //     port 68.
 //  3. Client's broadcast flag set: broadcast, port 68.
-//  4. Otherwise: unicast the offered/assigned address (yiaddr), port 68 —
-//     the client isn't listening on ciaddr yet, but is expected to accept
-//     traffic addressed to its about-to-be-configured address once ARP
-//     resolves it (standard behavior for servers without raw-socket access
-//     to address the client by hardware address directly).
+//  4. Otherwise: the offered/assigned address (yiaddr), port 68, delivered
+//     straight to the client's hardware address over AF_PACKET.
+//
+// Case 4 must not go out over the UDP socket. The client does not hold
+// yiaddr yet, so the kernel would ARP for it, get no answer -- nobody can
+// answer for an address that has not been handed out -- and silently drop
+// the reply. Since clients that leave the broadcast flag clear are the
+// common case rather than the exception (ISC dhclient, busybox udhcpc,
+// Windows, macOS), that path has to write the frame itself; see rawsend.go.
+// If no raw sender is available (no CAP_NET_RAW) it still falls back to the
+// UDP write, which is no worse than doing nothing.
 func (e *Engine) sendReply(pkt *DHCPPacket, resp *dhcpv4.DHCPv4) error {
 	dst := replyDestination(pkt.Packet, resp, pkt.Peer)
+
+	if needsHardwareDelivery(pkt.Packet, resp, dst) {
+		if err := e.sendViaHardwareAddr(pkt, resp, dst); err == nil {
+			return nil
+		} else {
+			e.log.Warn("dhcp: hardware-addressed reply failed, falling back to UDP unicast",
+				"interface", pkt.Interface, "client_mac", pkt.Packet.ClientHWAddr.String(),
+				"yiaddr", resp.YourIPAddr.String(), "error", err)
+		}
+	}
+
 	_, err := pkt.Conn.WriteTo(resp.ToBytes(), dst)
 	return err
+}
+
+// needsHardwareDelivery reports whether dst is replyDestination's case 4 --
+// an address the client does not have configured yet, so it is only
+// reachable by its hardware address.
+func needsHardwareDelivery(req, resp *dhcpv4.DHCPv4, dst *net.UDPAddr) bool {
+	return isZeroIP(req.GatewayIPAddr) &&
+		isZeroIP(req.ClientIPAddr) &&
+		!req.IsBroadcast() &&
+		!isZeroIP(resp.YourIPAddr) &&
+		dst != nil && dst.IP.Equal(resp.YourIPAddr) &&
+		len(req.ClientHWAddr) > 0
+}
+
+// sendViaHardwareAddr writes resp to the client's chaddr over AF_PACKET.
+func (e *Engine) sendViaHardwareAddr(pkt *DHCPPacket, resp *dhcpv4.DHCPv4, dst *net.UDPAddr) error {
+	rs := e.rawSenderFor(pkt.Interface)
+	if rs == nil {
+		return fmt.Errorf("dhcp: no raw sender for interface %s", pkt.Interface)
+	}
+	src := e.serverIdentifierFor(pkt.Interface)
+	if src == nil || isZeroIP(src) {
+		return fmt.Errorf("dhcp: no source address for interface %s", pkt.Interface)
+	}
+	return rs.sendUDP(src, dst.IP, dhcpv4.ServerPort, uint16(dst.Port), resp.ToBytes(), pkt.Packet.ClientHWAddr)
 }
 
 func replyDestination(req, resp *dhcpv4.DHCPv4, peer net.Addr) *net.UDPAddr {

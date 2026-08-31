@@ -265,7 +265,7 @@ func (m *mockStore) ListAuditLog(ctx context.Context, offset, limit int, filters
 
 // ---- everything else: unexercised by tests, stubbed to satisfy store.Store.
 
-func (m *mockStore) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string) (*models.DHCPLease, error) {
+func (m *mockStore) AllocateLease(ctx context.Context, poolID string, ident models.ClientIdentity, hostname *string, leaseDur time.Duration) (*models.DHCPLease, error) {
 	return nil, models.ErrNoLeases
 }
 func (m *mockStore) RenewLease(ctx context.Context, leaseID, clientMAC string, newExpiry time.Time, hostname *string) (*models.DHCPLease, error) {
