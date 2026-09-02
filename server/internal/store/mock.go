@@ -1564,6 +1564,20 @@ func (m *Mock) ExpireLeasesOlderThan(ctx context.Context, cutoff time.Time) (int
 	return n, nil
 }
 
+func (m *Mock) PurgeLeasesBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, l := range m.leases {
+		terminal := l.BindingState == models.LeaseStateExpired || l.BindingState == models.LeaseStateReleased
+		if terminal && l.LeaseEnd.Before(cutoff) {
+			delete(m.leases, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *Mock) ReservationForLease(ctx context.Context, poolID string, bindingKey string) (*models.DHCPReservation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

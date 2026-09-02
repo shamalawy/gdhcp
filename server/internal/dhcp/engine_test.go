@@ -588,3 +588,205 @@ func (f *fakePacketConn) LocalAddr() net.Addr                { return &net.UDPAd
 func (f *fakePacketConn) SetDeadline(t time.Time) error      { return nil }
 func (f *fakePacketConn) SetReadDeadline(t time.Time) error  { return nil }
 func (f *fakePacketConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// TestEngine_HandleDecline_AbandonsRatherThanReleases guards RFC 2131
+// §4.3.3: an address the client reported as already in use must not be
+// handed straight to the next client that asks. Only AbandonLease holds the
+// row back from claimLeaseIP's reclaim clause — ReleaseLease returns it to
+// the pool immediately, which is what this handler used to do.
+func TestEngine_HandleDecline_AbandonsRatherThanReleases(t *testing.T) {
+	env := newTestEnv(t)
+
+	mac := net.HardwareAddr{0xde, 0xad, 0xbe, 0xef, 0x00, 0x09}
+	declinedIP := net.IPv4(10, 0, 0, 12).To4()
+	const key = "pool1|10.0.0.12"
+	env.store.leasesByPoolIP[key] = &models.DHCPLease{
+		ID: "lease-declined", PoolID: "pool1", IPAddress: declinedIP,
+		ClientMAC: hwAddrPtr(mac), BindingState: models.LeaseStateActive,
+		LeaseStart: time.Now().Add(-time.Minute), LeaseEnd: time.Now().Add(time.Hour),
+	}
+
+	req, err := dhcpv4.New(
+		dhcpv4.WithHwAddr(mac),
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeDecline),
+		dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(declinedIP)),
+		dhcpv4.WithBroadcast(false),
+	)
+	if err != nil {
+		t.Fatalf("build decline: %v", err)
+	}
+
+	conn := &fakePacketConn{}
+	env.engine.dispatch(conn, &net.UDPAddr{IP: net.IPv4zero, Port: 68}, req, "testif0", net.IPv4(10, 0, 0, 254))
+
+	if conn.lastPacket != nil {
+		t.Fatal("DECLINE must not be answered")
+	}
+	if len(env.store.releasedLeaseIDs) != 0 {
+		t.Fatalf("ReleaseLease called for a declined address: %v", env.store.releasedLeaseIDs)
+	}
+	if got := env.store.abandonedLeaseIDs; len(got) != 1 || got[0] != "lease-declined" {
+		t.Fatalf("abandoned lease IDs = %v, want [lease-declined]", got)
+	}
+	if st := env.store.leasesByPoolIP[key].BindingState; st != models.LeaseStateAbandoned {
+		t.Fatalf("binding state = %s, want %s", st, models.LeaseStateAbandoned)
+	}
+}
+
+// TestEngine_HandleRelease_ReleasesNotAbandons is the counterpart to the
+// DECLINE test: RELEASE means "I am done with this address", so it must go
+// back into the pool immediately. Getting these two the same way round is
+// the whole point — an address released as abandoned would be withheld from
+// reallocation until the reaper swept it, quietly shrinking the pool.
+func TestEngine_HandleRelease_ReleasesNotAbandons(t *testing.T) {
+	env := newTestEnv(t)
+
+	mac := net.HardwareAddr{0xde, 0xad, 0xbe, 0xef, 0x00, 0x0a}
+	leaseIP := net.IPv4(10, 0, 0, 13).To4()
+	const key = "pool1|10.0.0.13"
+	env.store.leasesByPoolIP[key] = &models.DHCPLease{
+		ID: "lease-released", PoolID: "pool1", IPAddress: leaseIP,
+		ClientMAC: hwAddrPtr(mac), BindingState: models.LeaseStateActive,
+		LeaseStart: time.Now().Add(-time.Minute), LeaseEnd: time.Now().Add(time.Hour),
+	}
+
+	req, err := dhcpv4.New(
+		dhcpv4.WithHwAddr(mac),
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeRelease),
+		dhcpv4.WithClientIP(leaseIP),
+		dhcpv4.WithBroadcast(false),
+	)
+	if err != nil {
+		t.Fatalf("build release: %v", err)
+	}
+
+	conn := &fakePacketConn{}
+	env.engine.dispatch(conn, &net.UDPAddr{IP: leaseIP, Port: 68}, req, "testif0", net.IPv4(10, 0, 0, 254))
+
+	if conn.lastPacket != nil {
+		t.Fatal("RELEASE must not be answered")
+	}
+	if len(env.store.abandonedLeaseIDs) != 0 {
+		t.Fatalf("AbandonLease called for a released address: %v", env.store.abandonedLeaseIDs)
+	}
+	if got := env.store.releasedLeaseIDs; len(got) != 1 || got[0] != "lease-released" {
+		t.Fatalf("released lease IDs = %v, want [lease-released]", got)
+	}
+}
+
+// TestEngine_HandleInform_OmitsServerIdentifier guards RFC 2131 §3.4: a
+// DHCPACK answering a DHCPINFORM should not carry option 54. A client that
+// records one may later unicast RENEW traffic at a server holding no lease
+// for it. siaddr is unrestricted by §3.4 and is still expected to be set.
+func TestEngine_HandleInform_OmitsServerIdentifier(t *testing.T) {
+	env := newTestEnv(t)
+
+	mac := net.HardwareAddr{0xde, 0xad, 0xbe, 0xef, 0x00, 0x0b}
+	staticIP := net.IPv4(10, 0, 0, 14).To4()
+
+	req, err := dhcpv4.New(
+		dhcpv4.WithHwAddr(mac),
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeInform),
+		dhcpv4.WithClientIP(staticIP),
+		dhcpv4.WithBroadcast(false),
+	)
+	if err != nil {
+		t.Fatalf("build inform: %v", err)
+	}
+
+	conn := &fakePacketConn{}
+	env.engine.dispatch(conn, &net.UDPAddr{IP: staticIP, Port: 68}, req, "testif0", net.IPv4(10, 0, 0, 254))
+
+	if conn.lastPacket == nil {
+		t.Fatal("no reply was sent for INFORM")
+	}
+	resp, err := dhcpv4.FromBytes(conn.lastPacket)
+	if err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if resp.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("message type = %s, want ACK", resp.MessageType())
+	}
+	if sid := resp.ServerIdentifier(); sid != nil {
+		t.Fatalf("INFORM ack carries option 54 (%s); RFC 2131 §3.4 says it should not", sid)
+	}
+	// The options the client actually asked for must still be there —
+	// suppressing option 54 must not suppress the reply's payload.
+	if got := resp.DNS(); len(got) == 0 {
+		t.Fatal("INFORM ack carries no option 6; suppressing option 54 dropped real options too")
+	}
+	// No lease may be created for an INFORM (RFC 2131 §3.4).
+	if env.store.allocateLastLeaseDur != 0 {
+		t.Fatal("INFORM allocated a lease")
+	}
+}
+
+// TestEngine_HandleRequestInitReboot_NaksOutOfScopeIP covers the INIT-REBOOT
+// branch's guard: a client returning with an address from some other network
+// must be told to start over, not silently ignored.
+func TestEngine_HandleRequestInitReboot_NaksOutOfScopeIP(t *testing.T) {
+	env := newTestEnv(t)
+
+	mac := net.HardwareAddr{0xde, 0xad, 0xbe, 0xef, 0x00, 0x0c}
+	foreignIP := net.IPv4(192, 168, 50, 7).To4() // outside the 10.0.0.0/24 scope
+
+	req, err := dhcpv4.New(
+		dhcpv4.WithHwAddr(mac),
+		dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest),
+		dhcpv4.WithOption(dhcpv4.OptRequestedIPAddress(foreignIP)),
+		dhcpv4.WithBroadcast(false),
+	)
+	if err != nil {
+		t.Fatalf("build init-reboot request: %v", err)
+	}
+
+	conn := &fakePacketConn{}
+	env.engine.dispatch(conn, &net.UDPAddr{IP: net.IPv4zero, Port: 68}, req, "testif0", net.IPv4bcast)
+
+	if conn.lastPacket == nil {
+		t.Fatal("no reply was sent for an out-of-scope INIT-REBOOT request")
+	}
+	resp, err := dhcpv4.FromBytes(conn.lastPacket)
+	if err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if resp.MessageType() != dhcpv4.MessageTypeNak {
+		t.Fatalf("message type = %s, want NAK for an address outside every served scope", resp.MessageType())
+	}
+}
+
+// TestComputeTimers_ShortLeaseInvariant pins the clamp at the lengths that
+// used to break it: a one-second lease produced T2 = 0 (a rebinding time in
+// the past) and a two-second lease produced T1 == T2. Both were sent to
+// clients as options 58/59.
+func TestComputeTimers_ShortLeaseInvariant(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}, store: newMockStore(), log: slog.New(slog.NewTextHandler(bytesDiscard{}, nil))}
+	ctx := context.Background()
+
+	for _, lease := range []uint32{1, 2, 3, 4, 5, 10, 60, 600, 3600, 86400} {
+		t1, t2 := e.computeTimers(ctx, lease)
+
+		if t1 == 0 {
+			t.Errorf("lease=%d: T1 = 0, must be positive", lease)
+		}
+		if t2 < t1 {
+			t.Errorf("lease=%d: T2 (%d) < T1 (%d); rebinding must not precede renewal", lease, t2, t1)
+		}
+		if t2 > lease {
+			t.Errorf("lease=%d: T2 (%d) exceeds the lease itself", lease, t2)
+		}
+		// T2 == lease leaves the client no REBINDING window at all, so it
+		// must hold strictly for every lease long enough to allow it —
+		// which is everything but a one-second lease.
+		if lease >= 2 && t2 >= lease {
+			t.Errorf("lease=%d: T2 (%d) must be strictly less than the lease; "+
+				"T2 == lease leaves no rebinding window", lease, t2)
+		}
+		// Three whole seconds is the minimum needed to place T1 and T2
+		// strictly between 0 and the lease; at or above it, the strict
+		// ordering the doc comment promises must actually hold.
+		if lease >= 3 && !(t1 < t2 && t2 < lease) {
+			t.Errorf("lease=%d: want 0 < T1 < T2 < lease, got T1=%d T2=%d", lease, t1, t2)
+		}
+	}
+}

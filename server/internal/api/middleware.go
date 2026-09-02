@@ -27,6 +27,29 @@ import (
 
 // recoverMiddleware turns a panic anywhere downstream into a logged 500
 // INTERNAL_ERROR envelope instead of tearing down the connection/server.
+// maxRequestBodyBytes caps how much of a request body the API will read.
+// Every endpoint here takes a small JSON document -- the largest realistic
+// payload is a bulk option or template list -- so 1 MiB is generous. The
+// point is the floor it puts under memory: without it, an unauthenticated
+// POST to /auth/login (exempt from auth by design) can make this process
+// buffer as much as the caller cares to send.
+const maxRequestBodyBytes = 1 << 20
+
+// maxBodyMiddleware wraps every request body in http.MaxBytesReader, so no
+// handler's json.Decoder can be fed an unbounded stream. Past the cap the
+// reader yields *http.MaxBytesError, which httpx.DecodeJSON reports as a
+// 413 rather than a misleading malformed-JSON 400.
+func maxBodyMiddleware(limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, limit)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func recoverMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -15,9 +15,45 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/shamalawy/gdhcp/server/internal/models"
 )
+
+// The two database objects that enforce reservation uniqueness: the
+// (pool_id, binding_key) constraint declared inline in migration 0001 (hence
+// PostgreSQL's generated name) and the (pool_id, reserved_ip) index added by
+// migration 0007. CreateReservation/UpdateReservation check both conditions
+// with SELECTs first, but those SELECTs race; these are what actually holds,
+// and mapReservationWriteError translates a loss back into the same sentinel
+// the guard would have returned.
+const (
+	reservationUniqueClient = "dhcp_reservations_pool_id_binding_key_key"
+	reservationUniqueIP     = "uq_dhcp_reservations_pool_reserved_ip"
+)
+
+// mapReservationWriteError turns a uniqueness violation from the database
+// into the precise ErrReservationIPTaken/ErrReservationClientExists sentinel
+// the pre-flight guards produce, so a caller that lost the race sees the
+// same error as a caller that was simply second — rather than a raw
+// constraint name. Anything else falls through to mapWriteError.
+func mapReservationWriteError(err error, r *models.DHCPReservation, op string) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == sqlStateUniqueViolation {
+		switch pgErr.ConstraintName {
+		case reservationUniqueIP:
+			return fmt.Errorf("store: %s: %s already reserved in pool %s: %w: %w",
+				op, r.ReservedIP, r.PoolID, models.ErrReservationIPTaken, models.ErrConflict)
+		case reservationUniqueClient:
+			return fmt.Errorf("store: %s: %s already reserved in pool %s: %w: %w",
+				op, r.BindingKey, r.PoolID, models.ErrReservationClientExists, models.ErrConflict)
+		}
+	}
+	return mapWriteError(err, op)
+}
 
 const leaseSelectCols = `id, pool_id, ip_address, client_mac, client_id, client_hostname,
 	binding_state, binding_server_id, lease_start, lease_end, renewal_time, rebinding_time,
@@ -792,6 +828,25 @@ func (p *Postgres) ExpireLeasesOlderThan(ctx context.Context, cutoff time.Time) 
 	return expiredActive + tag.RowsAffected(), nil
 }
 
+// PurgeLeasesBefore deletes expired/released lease rows older than cutoff.
+//
+// No stats_active_lease_count adjustment is needed or wanted: a row only
+// reaches 'expired' or 'released' through a path that already decremented
+// the counter, so adjusting again here would drive it negative. 'active' and
+// 'abandoned' rows are deliberately not matched -- an active lease is live
+// regardless of age, and an abandoned one is being held back from
+// reallocation on purpose until the reaper rewrites it to 'expired', at
+// which point a later sweep will collect it.
+func (p *Postgres) PurgeLeasesBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, err := p.pool.Exec(ctx, `
+		DELETE FROM dhcp_leases
+		WHERE lease_end < $1 AND binding_state IN ('expired', 'released')`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("store: purge leases before %s: %w", cutoff.Format(time.RFC3339), err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ReservationForLease checks for a reservation matching bindingKey in poolID.
 func (p *Postgres) ReservationForLease(ctx context.Context, poolID string, bindingKey string) (*models.DHCPReservation, error) {
 	row := p.pool.QueryRow(ctx, `
@@ -1294,7 +1349,9 @@ func (p *Postgres) CreateReservation(ctx context.Context, r *models.DHCPReservat
 		r.ID, r.PoolID, r.Hostname, r.Description, r.ReservedIP, r.BindingKey, r.BindingType, r.IsEnabled, r.CreatedByUserID,
 	).Scan(&r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
-		return mapWriteError(err, "create reservation")
+		// The guards above raced if we get here with a uniqueness
+		// violation; migration 0007's index is what actually decided it.
+		return mapReservationWriteError(err, r, "create reservation")
 	}
 	p.notifyConfigChanged(ctx)
 	return nil
@@ -1360,7 +1417,13 @@ func (p *Postgres) UpdateReservation(ctx context.Context, r *models.DHCPReservat
 		r.ID, r.Hostname, r.Description, r.ReservedIP, r.BindingKey, r.BindingType, r.IsEnabled, r.UpdatedByUserID,
 	).Scan(&r.UpdatedAt)
 	if err != nil {
-		return mapWriteError(mapReadError(err, "update reservation "+r.ID), "update reservation")
+		// No row matched the id -- that is a read-shaped failure (not
+		// found), not a constraint one, and must not be reported as a
+		// conflict.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return mapReadError(err, "update reservation "+r.ID)
+		}
+		return mapReservationWriteError(err, r, "update reservation")
 	}
 	p.notifyConfigChanged(ctx)
 	return nil

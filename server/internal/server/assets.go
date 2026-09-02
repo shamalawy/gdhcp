@@ -83,6 +83,46 @@ func remoteIsPrivate(r *http.Request) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
+// securityHeaders wraps h with the response headers that stop a browser
+// second-guessing this server. It sits outside rootHandler so the REST API,
+// the same-port metrics endpoint and the embedded SPA all carry them —
+// putting it inside would leave whichever branch was forgotten uncovered.
+//
+// The CSP is written against what web/dist actually ships: the Angular build
+// emits inline <style> blocks (so style-src needs 'unsafe-inline') but loads
+// its JavaScript only from same-origin module scripts, so script-src gets no
+// such escape hatch. Font files come from fonts.gstatic.com; the
+// fonts.googleapis.com stylesheet is inlined at build time but is allowed
+// too, so a dev build served from this binary is not broken by the policy.
+//
+// hsts is set only when the API is actually served over TLS: sending
+// Strict-Transport-Security over plain HTTP is ignored by browsers at best,
+// and pins a hostname to a scheme it cannot serve at worst.
+func securityHeaders(h http.Handler, hsts bool) http.Handler {
+	const csp = "default-src 'self'; " +
+		"script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+		"font-src 'self' https://fonts.gstatic.com; " +
+		"img-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"object-src 'none'; " +
+		"frame-ancestors 'none'; " +
+		"base-uri 'self'; " +
+		"form-action 'self'"
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := w.Header()
+		hdr.Set("X-Content-Type-Options", "nosniff")
+		hdr.Set("X-Frame-Options", "DENY")
+		hdr.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		hdr.Set("Content-Security-Policy", csp)
+		if hsts {
+			hdr.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // metricsHandler mounts reg's Prometheus handler at path on its own
 // http.ServeMux, for use either as a same-port rootHandler.metrics or as the
 // Handler of a standalone metrics *http.Server.

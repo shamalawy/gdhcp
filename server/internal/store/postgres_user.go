@@ -68,14 +68,17 @@ func (p *Postgres) CreateUser(ctx context.Context, user *models.User) error {
 }
 
 func (p *Postgres) UpdateUser(ctx context.Context, user *models.User) error {
+	if !user.Role.Valid() {
+		return fmt.Errorf("store: update user %d: invalid role %q: %w", user.ID, user.Role, models.ErrInvalidInput)
+	}
 	var updatedBy any
 	if user.UpdatedByUser != nil {
 		updatedBy = user.UpdatedByUser.ID
 	}
 	err := p.pool.QueryRow(ctx, `
-		UPDATE users SET email=$2, description=$3, is_active=$4, updated_by_user_id=$5, updated_at=now()
+		UPDATE users SET username=$2, email=$3, role=$4, description=$5, is_active=$6, updated_by_user_id=$7, updated_at=now()
 		WHERE id = $1 RETURNING updated_at`,
-		user.ID, user.Email, user.Description, user.IsActive, updatedBy,
+		user.ID, user.Username, user.Email, user.Role, user.Description, user.IsActive, updatedBy,
 	).Scan(&user.UpdatedAt)
 	if err != nil {
 		return mapWriteError(mapReadError(err, fmt.Sprintf("update user %d", user.ID)), "update user")

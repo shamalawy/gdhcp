@@ -17,6 +17,13 @@ import (
 	"github.com/shamalawy/gdhcp/server/internal/store"
 )
 
+// maxConcurrentDispatch caps how many received packets are handled at once
+// across all interfaces. It sits above the pgx pool's default max
+// connections so ordinary bursts never queue on the semaphore -- the pool,
+// not this, is the steady-state limiter -- while still bounding the
+// goroutine and memory cost of a broadcast storm to something fixed.
+const maxConcurrentDispatch = 256
+
 // ServingGate lets the HA cluster manager decide whether this node should
 // currently answer DHCP traffic, without the DHCP engine importing the ha
 // package (amendment A10's decoupling rule: the DHCP engine defines this
@@ -24,11 +31,19 @@ import (
 // the concrete ha.Manager implementation in).
 type ServingGate interface {
 	// ShouldServe reports whether this node should process and reply to
-	// DHCP requests right now (e.g. it holds the cluster VIP, or HA is
-	// disabled and it is standalone). When false, the engine still reads
-	// packets off the wire (so sockets don't back up) but drops them
-	// silently rather than replying — exactly one node in a cluster must
-	// answer a given broadcast, or clients receive conflicting offers.
+	// DHCP requests right now. When false, the engine still reads packets
+	// off the wire (so sockets don't back up) but drops them silently
+	// rather than replying.
+	//
+	// False means this node cannot safely answer at all — it is still
+	// electing (INITIALIZING), fenced off from the database (ERROR), or
+	// shutting down. It does NOT mean "another node is primary": per
+	// amendment A11 and docs/design/ha-cluster.md's "Concurrent DHCP
+	// Serving & Load-Sharing", PRIMARY and SECONDARY both answer, and a
+	// client receiving two OFFERs is expected — RFC 2131 §4.4.1 has it pick
+	// one, and the REQUEST that follows is settled by the atomic INSERT in
+	// AllocateLease. Do not narrow this gate to primary-only; that demotes
+	// the secondary to a passive standby and gives up load-sharing.
 	ShouldServe() bool
 }
 
@@ -102,6 +117,16 @@ type Engine struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// dispatchSem bounds how many packets are being handled concurrently.
+	// Every dispatch goroutine holds a slot for its lifetime, so a burst
+	// (or a flood) parks in the kernel's socket buffer instead of turning
+	// into unbounded goroutines each waiting on a pgx pool connection.
+	// Acquiring it in serveListener rather than inside the goroutine is
+	// what makes that backpressure real: the read loop stops reading while
+	// saturated, and the kernel drops the excess -- the correct failure
+	// mode for a broadcast protocol clients retry anyway.
+	dispatchSem chan struct{}
+
 	// serverID identifies this node in logs (HA server_id, else hostname).
 	serverID string
 }
@@ -149,6 +174,7 @@ func New(cfg *config.Config, st store.Store, gate ServingGate, log *slog.Logger)
 		vrfCache:             make(map[string]vrfCacheEntry),
 		listeners:            make(map[string]*InterfaceListener),
 		rawSenders:           make(map[string]*rawSender),
+		dispatchSem:          make(chan struct{}, maxConcurrentDispatch),
 		serverID:             serverID,
 	}, nil
 }
@@ -262,8 +288,36 @@ func (e *Engine) serveListener(l *InterfaceListener) {
 			dst = cm.Dst
 		}
 
-		go e.dispatch(l.conn, upeer, m, l.ifname, dst)
+		// Take a dispatch slot before spawning. If every slot is busy this
+		// blocks the read loop, which is the point -- see dispatchSem.
+		// Stop() cancels e.ctx, so a saturated engine still shuts down
+		// instead of wedging here.
+		select {
+		case e.dispatchSem <- struct{}{}:
+		case <-ctxDone(e.ctx):
+			return
+		}
+
+		// Tracked in e.wg so Stop's Wait actually covers in-flight
+		// transactions. serveListener holds its own wg count for the whole
+		// of this loop, so the counter is never at zero when this Add runs.
+		e.wg.Add(1)
+		go func(conn net.PacketConn, peer *net.UDPAddr, m *dhcpv4.DHCPv4, ifname string, dst net.IP) {
+			defer e.wg.Done()
+			defer func() { <-e.dispatchSem }()
+			e.dispatch(conn, peer, m, ifname, dst)
+		}(l.conn, upeer, m, l.ifname, dst)
 	}
+}
+
+// ctxDone returns ctx's done channel, tolerating the nil context the engine
+// carries before Start (tests construct an Engine directly). A nil channel
+// blocks forever in a select, which is the correct "never cancelled" case.
+func ctxDone(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Done()
 }
 
 // Stop closes every listener socket, cancels the reaper, and waits for all
@@ -305,8 +359,10 @@ func (e *Engine) rawSenderFor(ifname string) *rawSender {
 // DORA handler in dora.go.
 func (e *Engine) dispatch(conn net.PacketConn, peer net.Addr, m *dhcpv4.DHCPv4, ifname string, dst net.IP) {
 	if !e.gate.ShouldServe() {
-		// Exactly one cluster node must answer a given broadcast; when HA
-		// says this node is not it, drop silently rather than reply.
+		// This node cannot answer safely right now (still electing, fenced
+		// off from the database, or shutting down) -- drop silently rather
+		// than reply. Note this is not "another node is primary": per
+		// amendment A11 both cluster roles serve. See ServingGate.
 		return
 	}
 	if m == nil {

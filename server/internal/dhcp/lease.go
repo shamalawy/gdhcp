@@ -43,24 +43,48 @@ func (e *Engine) resolveLeaseSeconds(ctx context.Context, scopeID, poolID, reser
 }
 
 // computeTimers derives T1/T2 (in seconds) from a lease duration, per the
-// fractions above, clamped so 0 < T1 < T2 < leaseSeconds holds even for very
-// short leases (matching dhcp_leases' times_valid CHECK constraint).
+// fractions above, clamped so 0 < T1 < T2 < leaseSeconds holds whenever the
+// lease is long enough for three distinct whole seconds to exist.
+//
+// Below three seconds the strict T1 < T2 ordering is arithmetically
+// impossible, so it is the one that gives way: T1 = T2 = leaseSeconds-1
+// (floored at 1). T2 < leaseSeconds is preserved instead, because that is
+// the inequality a client actually acts on — a T2 equal to the lease leaves
+// no REBINDING window at all, taking the client straight from BOUND to
+// expired. The looser ordering still satisfies dhcp_leases' times_valid
+// CHECK, which compares with <=.
+//
+// The previous clamp chain aimed for strictness at every length and instead
+// produced T2 = 0 for a one-second lease — a rebinding time in the past —
+// and emitted it to clients as option 59.
 func (e *Engine) computeTimers(ctx context.Context, leaseSeconds uint32) (t1, t2 uint32) {
+	if leaseSeconds == 0 {
+		return 0, 0
+	}
+	if leaseSeconds < 3 {
+		// leaseSeconds is 1 or 2 here; 1 is the floor, so a one-second
+		// lease unavoidably reports T2 == leaseSeconds.
+		short := leaseSeconds - 1
+		if short == 0 {
+			short = 1
+		}
+		return short, short
+	}
+
 	frac := e.t1Fraction(ctx)
 	t1 = uint32(float64(leaseSeconds) * frac)
 	t2 = uint32(float64(leaseSeconds) * t2Fraction)
 
+	// leaseSeconds >= 3 and t2Fraction = 0.875 put t2 at 2 or more before
+	// clamping, so t2-1 below can never underflow.
+	if t2 >= leaseSeconds {
+		t2 = leaseSeconds - 1
+	}
+	if t1 >= t2 {
+		t1 = t2 - 1
+	}
 	if t1 == 0 {
 		t1 = 1
-	}
-	if t2 <= t1 {
-		t2 = t1 + 1
-	}
-	if leaseSeconds > 0 && t2 >= leaseSeconds {
-		t2 = leaseSeconds - 1
-		if t2 <= t1 && t1 < leaseSeconds {
-			t2 = t1
-		}
 	}
 	return t1, t2
 }

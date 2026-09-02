@@ -78,8 +78,9 @@ const (
 	// free -- claimLeaseIP's reclaim clause accepts it.
 	LeaseStateExpired LeaseBindingState = "expired"
 
-	// LeaseStateReleased: the client sent RELEASE or DECLINE, or an operator
-	// released it. Operationally IDENTICAL to expired: claimLeaseIP matches
+	// LeaseStateReleased: the client sent RELEASE, or an operator released
+	// it. DECLINE lands in abandoned instead, per RFC 2131 §4.3.3 -- see
+	// LeaseStateAbandoned. Operationally IDENTICAL to expired: claimLeaseIP matches
 	// both with one `binding_state IN ('expired', 'released')` clause. The two
 	// differ only in how the row got here.
 	LeaseStateReleased LeaseBindingState = "released"

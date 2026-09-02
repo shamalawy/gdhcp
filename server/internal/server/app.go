@@ -35,6 +35,19 @@ const (
 	statsFlushInterval        = 10 * time.Second
 	utilizationSampleInterval = 60 * time.Second
 
+	// dbPoolStatsInterval is how often db.StartPoolStatsReporter samples
+	// pgxpool.Stat() into the gdhcp_db_pool_* gauges. Pool saturation is a
+	// slow-moving capacity signal, not a hot metric, so this matches the
+	// reporter's own documented default rather than the faster stats cadence
+	// above.
+	dbPoolStatsInterval = 15 * time.Second
+
+	// leasePurgeInterval is how often retention deletes lease history past
+	// database.lease_retention_days. Retention is measured in days, so
+	// sweeping more often than this buys nothing and only adds write load;
+	// the first sweep lands one interval after startup.
+	leasePurgeInterval = 6 * time.Hour
+
 	// shutdownTimeout bounds how long graceful shutdown waits for the HTTP
 	// server to drain in-flight requests (including long-lived SSE streams,
 	// amendment A12) and for the HA manager's background loops to exit.
@@ -82,6 +95,13 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	if cfg.Metrics.Enabled {
 		reg = metrics.New()
 		reg.SetBuildInfo(ver.Version, ver.Commit, ver.BuildDate)
+
+		// The gdhcp_db_pool_* gauges are the only metrics nothing on a
+		// request path writes -- they have to be polled off pgxpool.Stat().
+		// Without this goroutine the registry exports them as a constant 0,
+		// which reads on a capacity dashboard as "the pool is idle" rather
+		// than "nobody is sampling it".
+		go db.StartPoolStatsReporter(ctx, pool, reg, dbPoolStatsInterval)
 
 		if cfg.Metrics.ListenAddr == cfg.Server.APIAddr {
 			sameportMetrics = metricsHandler(cfg.Metrics.Path, reg)
@@ -139,6 +159,29 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		}
 	})
 
+	// Lease-history retention. The DHCP engine's own reaper only rewrites
+	// binding_state to 'expired'; nothing deleted those rows, so
+	// database.lease_retention_days was configured, defaulted and validated
+	// while having no effect at all. A high-churn network rewrites the same
+	// addresses continuously, so this is the difference between a bounded
+	// dhcp_leases table and one that only ever grows. 0 disables it.
+	if cfg.Database.LeaseRetentionDays > 0 {
+		retention := time.Duration(cfg.Database.LeaseRetentionDays) * 24 * time.Hour
+		go runPeriodic(ctx, leasePurgeInterval, func(c context.Context) {
+			n, err := st.PurgeLeasesBefore(c, time.Now().Add(-retention))
+			if err != nil {
+				log.Error("server: purge lease history", "error", err)
+				return
+			}
+			if n > 0 {
+				log.Info("server: purged lease history past retention",
+					"count", n, "retention_days", cfg.Database.LeaseRetentionDays)
+			}
+		})
+	} else {
+		log.Info("server: lease history retention disabled", "reason", "lease_retention_days = 0")
+	}
+
 	// -- DHCP engine (skipped entirely in API/UI-only mode). --------------
 	var eng *dhcp.Engine
 	var engineInfo api.EngineInfo
@@ -176,12 +219,12 @@ func Run(ctx context.Context, cfg *config.Config) error {
 
 	httpServer := &http.Server{
 		Addr: cfg.Server.APIAddr,
-		Handler: &rootHandler{
+		Handler: securityHeaders(&rootHandler{
 			api:         apiHandler,
 			assets:      spaFileServer(assets),
 			metricsPath: cfg.Metrics.Path,
 			metrics:     sameportMetrics,
-		},
+		}, cfg.Server.APITLSEnabled),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

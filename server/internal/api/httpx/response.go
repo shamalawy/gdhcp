@@ -27,6 +27,7 @@ const (
 	CodeConflict           ErrorCode = "CONFLICT"
 	CodeInternalError      ErrorCode = "INTERNAL_ERROR"
 	CodeServiceUnavailable ErrorCode = "SERVICE_UNAVAILABLE"
+	CodeRateLimited        ErrorCode = "RATE_LIMITED"
 )
 
 // APIError is a handler-raised error that carries its own HTTP status, code,
@@ -66,6 +67,20 @@ func Unauthorized(msg string) *APIError {
 // Forbidden builds a 403 FORBIDDEN error.
 func Forbidden(msg string) *APIError {
 	return &APIError{Status: http.StatusForbidden, Code: CodeForbidden, Message: msg}
+}
+
+// TooLarge builds a 413 error for a request body that exceeded the limit
+// imposed by the API's http.MaxBytesReader middleware. It reuses
+// CodeInvalidInput rather than introducing a new ErrorCode: the client's
+// input is what is wrong, and the documented code set stays closed.
+func TooLarge(msg string) *APIError {
+	return &APIError{Status: http.StatusRequestEntityTooLarge, Code: CodeInvalidInput, Message: msg}
+}
+
+// TooManyRequests builds a 429 RATE_LIMITED error. Callers should also set
+// a Retry-After header so a well-behaved client knows when to come back.
+func TooManyRequests(msg string) *APIError {
+	return &APIError{Status: http.StatusTooManyRequests, Code: CodeRateLimited, Message: msg}
 }
 
 // Internal builds a 500 INTERNAL_ERROR error. msg is sent to the client as
@@ -216,6 +231,14 @@ func DecodeJSON(r *http.Request, v any) error {
 	if err := dec.Decode(v); err != nil {
 		if errors.Is(err, io.EOF) {
 			return Invalid("request body is required")
+		}
+		// The API's maxBodyMiddleware wraps every body in an
+		// http.MaxBytesReader; past the cap the decoder surfaces its
+		// *http.MaxBytesError. Reporting that as "malformed JSON" would
+		// send a caller hunting a syntax error that isn't there.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return TooLarge(fmt.Sprintf("request body exceeds the %d byte limit", tooLarge.Limit))
 		}
 		return Invalid(fmt.Sprintf("malformed JSON body: %v", err))
 	}

@@ -37,6 +37,8 @@ type mockStore struct {
 	allocateLastHostname *string
 	allocateLastLeaseDur time.Duration
 	renewCalled          bool
+	releasedLeaseIDs     []string
+	abandonedLeaseIDs    []string
 
 	servers              []*models.ClusterServer
 	clusterSizeCallCount int
@@ -98,11 +100,30 @@ func (m *mockStore) RenewLease(ctx context.Context, leaseID string, clientMAC st
 }
 
 func (m *mockStore) ReleaseLease(ctx context.Context, leaseID string, clientMAC string) error {
+	m.releasedLeaseIDs = append(m.releasedLeaseIDs, leaseID)
+	if l, ok := m.leasesByPoolIP[m.poolIPKeyByLeaseID(leaseID)]; ok {
+		l.BindingState = models.LeaseStateReleased
+	}
 	return nil
 }
 
 func (m *mockStore) AbandonLease(ctx context.Context, leaseID string, clientMAC string) error {
+	m.abandonedLeaseIDs = append(m.abandonedLeaseIDs, leaseID)
+	if l, ok := m.leasesByPoolIP[m.poolIPKeyByLeaseID(leaseID)]; ok {
+		l.BindingState = models.LeaseStateAbandoned
+	}
 	return nil
+}
+
+// poolIPKeyByLeaseID reverse-maps a lease ID onto its leasesByPoolIP key so
+// the release/abandon doubles can mutate the stored row's binding state.
+func (m *mockStore) poolIPKeyByLeaseID(leaseID string) string {
+	for k, l := range m.leasesByPoolIP {
+		if l.ID == leaseID {
+			return k
+		}
+	}
+	return ""
 }
 
 func (m *mockStore) GetLeaseByIP(ctx context.Context, poolID string, ip net.IP) (*models.DHCPLease, error) {
@@ -121,6 +142,10 @@ func (m *mockStore) GetLeasesByPool(ctx context.Context, poolID string, state st
 }
 
 func (m *mockStore) ExpireLeasesOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) PurgeLeasesBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	return 0, nil
 }
 

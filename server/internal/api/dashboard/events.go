@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -31,6 +30,13 @@ type clusterPush struct {
 	Health    *models.ClusterHealth
 }
 
+type scopeChurn struct {
+	ScopeID string  `json:"scope_id"`
+	Active  int64   `json:"active"`
+	Total   int64   `json:"total"`
+	Pct     float64 `json:"pct"`
+}
+
 // Events handles GET /api/v1/events: an amendment-A12 Server-Sent Events
 // stream emitting `stats` (dashboard rollup, ~every 10s), `leases` (per-scope
 // active-lease-count churn, polled alongside stats — the store surface has
@@ -38,7 +44,15 @@ type clusterPush struct {
 // allows), and `cluster` (pushed immediately on every HAStatus.Subscribe
 // callback). A ": heartbeat" comment every 15s keeps intermediary proxies
 // from closing the idle connection.
+//
+// The polling happens once for the whole server, in the eventHub created
+// here at wiring time (hub.go); this handler only forwards what the hub
+// broadcasts. Every connection used to poll independently, so query load
+// scaled with the number of open dashboards instead of with the size of the
+// deployment.
 func Events(st store.Store, cluster ClusterWatcher, log *slog.Logger) http.HandlerFunc {
+	hub := newEventHub(st, log)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		// http.NewResponseController, not a raw `w.(http.Flusher)` type
 		// assertion: logger.Middleware (mounted outermost, ahead of every
@@ -64,9 +78,8 @@ func Events(st store.Store, cluster ClusterWatcher, log *slog.Logger) http.Handl
 		ctx := r.Context()
 
 		pushes := make(chan clusterPush, 8)
-		var unsubscribe func()
 		if cluster != nil {
-			unsubscribe = cluster.Subscribe(func(clusterID string, health *models.ClusterHealth) {
+			unsubscribe := cluster.Subscribe(func(clusterID string, health *models.ClusterHealth) {
 				select {
 				case pushes <- clusterPush{ClusterID: clusterID, Health: health}:
 				default: // slow/gone consumer: drop rather than block the HA manager
@@ -75,25 +88,23 @@ func Events(st store.Store, cluster ClusterWatcher, log *slog.Logger) http.Handl
 			defer unsubscribe()
 		}
 
-		statsTicker := time.NewTicker(statsInterval)
-		defer statsTicker.Stop()
+		// Attaching primes the channel with the hub's latest snapshot, so
+		// the UI renders immediately rather than waiting out a tick.
+		events, release := hub.subscribe()
+		defer release()
+
 		heartbeatTicker := time.NewTicker(heartbeatInterval)
 		defer heartbeatTicker.Stop()
-
-		churn := newChurnTracker(st, log)
-
-		// Send an initial snapshot immediately so the UI doesn't wait a full
-		// tick before showing anything.
-		emitStats(ctx, w, rc, st, log)
-		churn.emit(ctx, w, rc)
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-statsTicker.C:
-				emitStats(ctx, w, rc, st, log)
-				churn.emit(ctx, w, rc)
+			case msg, ok := <-events:
+				if !ok {
+					return
+				}
+				writeEvent(w, rc, msg.event, msg.data)
 			case <-heartbeatTicker.C:
 				if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
 					return
@@ -111,15 +122,6 @@ func Events(st store.Store, cluster ClusterWatcher, log *slog.Logger) http.Handl
 	}
 }
 
-func emitStats(ctx context.Context, w http.ResponseWriter, rc *http.ResponseController, st store.Store, log *slog.Logger) {
-	s, err := st.GetDashboardStats(ctx, defaultStatsWindow)
-	if err != nil {
-		log.Warn("api: sse stats query failed", "error", err)
-		return
-	}
-	writeEvent(w, rc, "stats", s)
-}
-
 func writeEvent(w http.ResponseWriter, rc *http.ResponseController, event string, data any) {
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -129,55 +131,4 @@ func writeEvent(w http.ResponseWriter, rc *http.ResponseController, event string
 		return
 	}
 	_ = rc.Flush()
-}
-
-// churnTracker polls per-scope active-lease counts and emits only the scopes
-// whose active count changed since the last poll, keeping the `leases`
-// event payload small on a quiet system.
-type churnTracker struct {
-	st   store.Store
-	log  *slog.Logger
-	last map[string]int64
-}
-
-func newChurnTracker(st store.Store, log *slog.Logger) *churnTracker {
-	return &churnTracker{st: st, log: log, last: make(map[string]int64)}
-}
-
-type scopeChurn struct {
-	ScopeID string  `json:"scope_id"`
-	Active  int64   `json:"active"`
-	Total   int64   `json:"total"`
-	Pct     float64 `json:"pct"`
-}
-
-func (c *churnTracker) emit(ctx context.Context, w http.ResponseWriter, rc *http.ResponseController) {
-	res, err := c.st.ListScopes(ctx, store.ListParams{Limit: churnListLimit})
-	if err != nil {
-		c.log.Warn("api: sse leases churn: list scopes failed", "error", err)
-		return
-	}
-
-	var changed []scopeChurn
-	seen := make(map[string]bool, len(res.Items))
-	for _, scope := range res.Items {
-		seen[scope.ID] = true
-		u, err := c.st.GetScopeUtilization(ctx, scope.ID)
-		if err != nil {
-			continue
-		}
-		if prev, ok := c.last[scope.ID]; !ok || prev != u.Active {
-			changed = append(changed, scopeChurn{ScopeID: scope.ID, Active: u.Active, Total: u.Total, Pct: u.UtilizationPercentage})
-		}
-		c.last[scope.ID] = u.Active
-	}
-	for id := range c.last {
-		if !seen[id] {
-			delete(c.last, id)
-		}
-	}
-
-	if len(changed) > 0 {
-		writeEvent(w, rc, "leases", changed)
-	}
 }

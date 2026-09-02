@@ -56,10 +56,12 @@ func handleLogin(users store.UserStore, audit store.AuditStore, jwt *jwtIssuer, 
 			// whose password happens to be wrong, closing the timing gap
 			// an attacker could otherwise use to enumerate usernames.
 			_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(req.Password))
+			logFailedLogin(r, audit, req.Username)
 			httpx.RespondError(w, r, log, httpx.Unauthorized("invalid username or password"))
 			return
 		}
 		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+			logFailedLogin(r, audit, req.Username)
 			httpx.RespondError(w, r, log, httpx.Unauthorized("invalid username or password"))
 			return
 		}
@@ -92,6 +94,45 @@ func handleLogin(users store.UserStore, audit store.AuditStore, jwt *jwtIssuer, 
 			RefreshToken: refresh,
 		})
 	}
+}
+
+// auditEntityIDMax is audit_log.entity_id's column width. A failed login
+// records the username the caller supplied, which on this path is
+// attacker-controlled and unvalidated, so it is truncated rather than
+// allowed to fail the INSERT and lose the record entirely.
+const auditEntityIDMax = 255
+
+// logFailedLogin records a rejected credential submission, carrying the
+// attempted username and the source address.
+//
+// UserID is deliberately always nil, even when the username did resolve to a
+// real account. handleLogin goes to some length (dummyBcryptHash) to make
+// its two rejection paths cost the same, and attributing the row to a user
+// id on one path but not the other would reintroduce an asymmetry through
+// the audit insert instead: only the known-user path would pay the users(id)
+// foreign-key check. The account is still identifiable — EntityID/EntityName
+// carry the attempted username, which is what an operator investigating a
+// brute-force run actually searches on. audit_log.user_id is nullable, so
+// the row lands either way.
+//
+// The write happens on both rejection paths. Its throughput is bounded by
+// rateLimit, which rejects before reaching here — auditing every attempt
+// without that limit would turn an unauthenticated endpoint into an
+// unbounded write amplifier.
+func logFailedLogin(r *http.Request, audit store.AuditStore, username string) {
+	name := username
+	if len(name) > auditEntityIDMax {
+		name = name[:auditEntityIDMax]
+	}
+	_ = audit.LogAction(r.Context(), &models.AuditLog{
+		UserID:     nil,
+		Action:     models.AuditActionLoginFailed,
+		EntityType: "user",
+		EntityID:   name,
+		EntityName: &name,
+		IPAddress:  clientIPPtr(r),
+		UserAgent:  headerPtr(r, "User-Agent"),
+	})
 }
 
 // handleLogout handles POST /api/v1/auth/logout. Sessions are stateless

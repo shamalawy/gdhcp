@@ -79,7 +79,10 @@ func New(cfg *config.Config, st store.Store, ha HAStatus, engine EngineInfo, log
 	// -- Auth & health (no RBAC role check: login/refresh run before a
 	// principal exists, logout only needs *a* valid principal of any role,
 	// and health is unauthenticated entirely). -----------------------------
-	api.HandleFunc("/auth/login", handleLogin(st, st, jwt, log)).Methods(http.MethodPost)
+	// /auth/login is the one route the authenticator lets through
+	// unauthenticated, so it is also the one route that needs its own
+	// throttle — see ratelimit.go.
+	api.HandleFunc("/auth/login", rateLimit(newLoginLimiter(), log, handleLogin(st, st, jwt, log))).Methods(http.MethodPost)
 	api.HandleFunc("/auth/logout", handleLogout(log)).Methods(http.MethodPost)
 	api.HandleFunc("/auth/refresh", handleRefresh(st, jwt, log)).Methods(http.MethodPost)
 	api.HandleFunc("/health", handleHealth(st, ha, engine, log)).Methods(http.MethodGet)
@@ -233,6 +236,7 @@ func New(cfg *config.Config, st store.Store, ha HAStatus, engine EngineInfo, log
 	root.MethodNotAllowedHandler = methodNotAllowedHandler(log)
 
 	var handler http.Handler = root
+	handler = maxBodyMiddleware(maxRequestBodyBytes)(handler)
 	handler = corsMiddleware(cfg.Server.CORSAllowedOrigins)(handler)
 	handler = recoverMiddleware(log)(handler)
 	handler = logger.Middleware(log)(handler)

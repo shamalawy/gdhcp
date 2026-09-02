@@ -257,6 +257,22 @@ func (m *mockStore) LogAction(ctx context.Context, log *models.AuditLog) error {
 	return nil
 }
 
+// failedLogins returns the recorded login_failed entries in order, so a test
+// can assert both that an attempt was recorded and what it was attributed to.
+func (m *mockStore) failedLogins() []*models.AuditLog {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*models.AuditLog
+	for _, l := range m.auditLogs {
+		if l.Action == models.AuditActionLoginFailed {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func (m *mockStore) failedLoginCount() int { return len(m.failedLogins()) }
+
 func (m *mockStore) ListAuditLog(ctx context.Context, offset, limit int, filters map[string]interface{}) ([]*models.AuditLog, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -297,6 +313,9 @@ func (m *mockStore) GetLeasesByPool(ctx context.Context, poolID, state string, o
 	return nil, 0, nil
 }
 func (m *mockStore) ExpireLeasesOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) PurgeLeasesBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	return 0, nil
 }
 func (m *mockStore) ReservationForLease(ctx context.Context, poolID, bindingKey string) (*models.DHCPReservation, error) {

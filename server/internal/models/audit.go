@@ -13,6 +13,13 @@ const (
 	AuditActionLeaseRelease AuditAction = "lease_release"
 	AuditActionLogin        AuditAction = "login"
 	AuditActionFailover     AuditAction = "failover"
+
+	// AuditActionLoginFailed records a rejected credential submission.
+	// Its AuditLog.UserID is nil when the username did not resolve to an
+	// account (audit_log.user_id is nullable), so the attempted name is
+	// carried in EntityID/EntityName instead. Without this action a brute
+	// force run leaves no trace at all until it succeeds.
+	AuditActionLoginFailed AuditAction = "login_failed"
 )
 
 // AuditChange captures the before/after of one changed field, keyed by

@@ -286,11 +286,12 @@ func (e *Engine) findLeaseByIPAcrossScopes(ctx context.Context, scopes []*models
 
 // handleDecline implements DECLINE: the client reports the offered/leased
 // address as unusable (e.g. an ARP conflict it detected). No response is
-// sent per RFC 2131. store.LeaseStore has no method that transitions a
-// lease straight to models.LeaseStateAbandoned (only Release, which frees
-// the address for immediate reallocation) — see notes_for_integration; the
-// best available action today is to release the binding so this client is
-// not handed the same conflicted address again.
+// sent per RFC 2131. The binding is abandoned rather than released: RFC 2131
+// §4.3.3 requires that a declined address not be handed to another client,
+// and only AbandonLease holds the row back from AllocateLease's reclaim
+// until ExpireLeasesOlderThan sweeps it. ReleaseLease would return the
+// conflicted address to the pool immediately — the same trap the ping-check
+// retry in allocation.go already documents.
 func (e *Engine) handleDecline(ctx context.Context, pkt *DHCPPacket) error {
 	req := pkt.Packet
 	declinedIP := req.RequestedIPAddress()
@@ -306,7 +307,7 @@ func (e *Engine) handleDecline(ctx context.Context, pkt *DHCPPacket) error {
 		lease, _, scope, ferr := e.findLeaseByIPAcrossScopes(ctx, sc.Scopes, declinedIP)
 		if ferr == nil {
 			scopeID = scope.ID
-			outcome = e.store.ReleaseLease(ctx, lease.ID, macStr)
+			outcome = e.store.AbandonLease(ctx, lease.ID, macStr)
 		} else {
 			outcome = ferr
 		}
@@ -402,7 +403,14 @@ func (e *Engine) handleInform(ctx context.Context, pkt *DHCPPacket) error {
 	if pool != nil {
 		poolID = pool.ID
 	}
-	opts, err := e.buildReplyOptions(ctx, req, scope, pool, "", 0, 0, 0, serverID, false)
+	// nil serverID, not the resolved one: RFC 2131 §3.4 says a server
+	// SHOULD NOT return option 54 in a DHCPACK answering a DHCPINFORM. The
+	// client already has its address and is asking only for parameters, so
+	// naming a server to bind to is meaningless — and a client that records
+	// it may later unicast RENEW traffic at a server holding no lease for
+	// it. siaddr above still carries the address, which §3.4 does not
+	// restrict; only the option is suppressed.
+	opts, err := e.buildReplyOptions(ctx, req, scope, pool, "", 0, 0, 0, nil, false)
 	if err != nil {
 		return fmt.Errorf("dhcp: resolve inform options: %w", err)
 	}

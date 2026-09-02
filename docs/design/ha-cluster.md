@@ -258,9 +258,11 @@ SELECT server_id FROM ranked_servers WHERE rank = 1;
 
 ### Design: Both Servers Answer DHCP
 
-Because DHCP lease allocation is atomic in PostgreSQL (via single `INSERT` with unique constraint on `client_mac + scope_id`), both servers can safely:
+Because DHCP lease allocation is atomic in PostgreSQL — a single `INSERT ... ON CONFLICT (pool_id, ip_address) DO NOTHING` against the `UNIQUE (pool_id, ip_address)` constraint on `dhcp_leases` — both servers can safely:
 1. Answer DISCOVER packets (both send OFFER).
-2. Accept REQUEST packets (first to INSERT wins; second gets constraint violation).
+2. Accept REQUEST packets (first to INSERT wins; the second sees zero rows affected and retries with a different candidate).
+
+> **The constraint is on the address, not on the client.** Two nodes racing the same client's DISCOVER cannot hand the same address to different clients, which is the property that makes concurrent serving safe. They *can* pick two different candidate addresses for that one client and offer both — see the note under step 3 below.
 
 ### DHCP Packet Flow
 
@@ -268,7 +270,7 @@ Because DHCP lease allocation is atomic in PostgreSQL (via single `INSERT` with 
 
 1. Both primary and secondary receive the broadcast.
 2. Both query `pool_leases` to check if client already has a lease (XID tracking).
-3. Both craft OFFER packets (same IP, same options).
+3. Both craft OFFER packets. They carry the same options, but **not necessarily the same address**: when the client has no existing lease, each node runs its own candidate scan, and two scans that interleave can settle on two different free addresses. Only one of them is claimed at REQUEST; the other is left as an unclaimed row that the reaper expires.
 4. Both send OFFER back to client.
 5. Client may receive 2 OFFERs; this is normal (DHCP spec allows multiple offers).
 6. Client picks one and sends REQUEST.

@@ -108,6 +108,14 @@ type LeaseStore interface {
 	// expired. Called by the background reaper; returns count expired.
 	ExpireLeasesOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
 
+	// PurgeLeasesBefore deletes terminal-state lease rows (expired,
+	// released) whose lease_end is older than cutoff, returning how many
+	// were removed. This is the other half of retention:
+	// ExpireLeasesOlderThan only rewrites binding_state, so without a purge
+	// dhcp_leases grows without bound in a high-churn deployment. Driven by
+	// database.lease_retention_days.
+	PurgeLeasesBefore(ctx context.Context, cutoff time.Time) (int64, error)
+
 	// ReservationsForKeys checks if a reservation exists for any of the given
 	// binding keys in pool, returning the first match in the keys' precedence
 	// order (which must match models.ClientIdentity.BindingKeys()' order).
