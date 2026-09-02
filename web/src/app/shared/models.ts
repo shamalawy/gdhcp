@@ -69,6 +69,9 @@ export interface LoginRequest {
 export interface LoginResponse {
   token: string;
   expires_at: string;
+  /** Long-lived token used to mint a new access token without re-entering
+   * credentials. Optional because the field is `omitempty` server-side. */
+  refresh_token?: string;
 }
 
 export interface RefreshRequest {

@@ -1,8 +1,15 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, signal } from '@angular/core';
-import { Observable, tap } from 'rxjs';
+import { Observable, finalize, map, shareReplay, tap, throwError } from 'rxjs';
 
-import { LoginRequest, LoginResponse, MessageResponse, UserRole } from '../shared/models';
+import {
+  LoginRequest,
+  LoginResponse,
+  MessageResponse,
+  RefreshRequest,
+  RefreshResponse,
+  UserRole,
+} from '../shared/models';
 
 const STORAGE_KEY = 'gdhcp_session';
 
@@ -19,6 +26,9 @@ interface JwtClaims {
 
 export interface Session {
   token: string;
+  /** Set from the login/refresh response. Null only for a session stored by
+   * a build that predates refresh support, which simply cannot renew. */
+  refreshToken: string | null;
   expiresAt: string;
   username: string | null;
   role: UserRole | null;
@@ -41,10 +51,17 @@ function loadSession(): Session | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const session = JSON.parse(raw) as Session;
-    if (!session.token || new Date(session.expiresAt).getTime() <= Date.now()) {
-      return null;
-    }
-    return session;
+    if (!session.token) return null;
+
+    // An expired access token is not on its own a reason to throw the
+    // session away: if a refresh token came with it, the interceptor can
+    // trade it for a new one on the first request. Only a session with
+    // nothing left to renew is discarded here, which is what a session
+    // stored before refresh support looks like.
+    const expired = new Date(session.expiresAt).getTime() <= Date.now();
+    if (expired && !session.refreshToken) return null;
+
+    return { ...session, refreshToken: session.refreshToken ?? null };
   } catch {
     return null;
   }
@@ -59,6 +76,9 @@ export class AuthService {
   readonly username = computed(() => this.sessionSignal()?.username ?? null);
   readonly role = computed(() => this.sessionSignal()?.role ?? null);
 
+  /** The single in-flight refresh, shared by every caller; see refresh(). */
+  private refreshInFlight: Observable<Session> | null = null;
+
   constructor(private readonly http: HttpClient) {}
 
   token(): string | null {
@@ -67,17 +87,49 @@ export class AuthService {
 
   login(credentials: LoginRequest): Observable<LoginResponse> {
     return this.http.post<LoginResponse>('/api/v1/auth/login', credentials).pipe(
-      tap((res) => {
-        const claims = decodeJwtClaims(res.token);
-        const session: Session = {
-          token: res.token,
-          expiresAt: res.expires_at,
-          username: claims.username ?? claims.sub ?? credentials.username,
-          role: claims.role ?? null,
-        };
-        this.persist(session);
-      }),
+      tap((res) => this.persist(this.sessionFrom(res, credentials.username))),
     );
+  }
+
+  /** Trades the stored refresh token for a fresh access token.
+   *
+   * Concurrent callers share one request. Several in-flight requests can 401
+   * in the same instant, and the server rotates the refresh token on every
+   * use — so firing one refresh per failure would invalidate the token the
+   * other calls are still holding and log the user out for the exact reason
+   * this method exists to prevent. */
+  refresh(): Observable<Session> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+
+    const refreshToken = this.sessionSignal()?.refreshToken;
+    if (!refreshToken) {
+      return throwError(() => new Error('no refresh token available'));
+    }
+
+    const body: RefreshRequest = { refresh_token: refreshToken };
+    this.refreshInFlight = this.http.post<RefreshResponse>('/api/v1/auth/refresh', body).pipe(
+      map((res) => this.sessionFrom(res, this.sessionSignal()?.username ?? null)),
+      tap((session) => this.persist(session)),
+      finalize(() => {
+        this.refreshInFlight = null;
+      }),
+      shareReplay({ bufferSize: 1, refCount: false }),
+    );
+    return this.refreshInFlight;
+  }
+
+  /** Builds a Session from a login or refresh response. The refresh token
+   * falls back to the one already held: the field is `omitempty` server-side,
+   * so an empty one in the response means "unchanged", not "revoked". */
+  private sessionFrom(res: LoginResponse, fallbackUsername: string | null): Session {
+    const claims = decodeJwtClaims(res.token);
+    return {
+      token: res.token,
+      refreshToken: res.refresh_token ?? this.sessionSignal()?.refreshToken ?? null,
+      expiresAt: res.expires_at,
+      username: claims.username ?? claims.sub ?? fallbackUsername,
+      role: claims.role ?? null,
+    };
   }
 
   /** Calls the server-side revoke endpoint, then clears local session state
@@ -92,6 +144,7 @@ export class AuthService {
    * `/auth/logout` with an already-invalid token would just 401 again). */
   clear(): void {
     this.sessionSignal.set(null);
+    this.refreshInFlight = null;
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
