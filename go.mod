@@ -1,6 +1,6 @@
 module github.com/shamalawy/gdhcp
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -14,7 +14,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.1
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
