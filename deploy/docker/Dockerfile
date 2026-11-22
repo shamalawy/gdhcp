@@ -15,7 +15,7 @@ COPY web/ .
 RUN npm run build
 
 # ---- Stage 2: Go binary (CGO_ENABLED=0, pure Go per amendment A3) --------
-FROM golang:1.26-alpine AS go-builder
+FROM golang:1.27-alpine AS go-builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
