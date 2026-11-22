@@ -41,7 +41,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -o /out/gdhcp ./server/cmd/gdhcp
 
 # ---- Stage 3: runtime -------------------------------------------------
-FROM alpine:3.20
+FROM alpine:3.24
 
 # ca-certificates: TLS to Postgres / outbound HTTPS.
 # libcap: setcap, so the binary can bind port 67 and manage the VIP without
